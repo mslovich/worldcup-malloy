@@ -11,11 +11,16 @@
     "topscorers": "node run.mjs \"goals -> top_scorers\"",
     "by-tournament": "node run.mjs \"matches -> by_tournament\"",
     "by-team": "node run.mjs \"team_appearances -> by_team\"",
+    "mcp": "node mcp_server.mjs",
     "cli": "malloy-cli run explore.malloy"
   },
-  "devDependencies": {
+  "dependencies": {
     "@malloydata/malloy": "^0.0.412",
     "@malloydata/db-duckdb": "^0.0.412",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
     "malloy-cli": "^0.0.38"
   }
 }

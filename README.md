@@ -150,6 +150,29 @@ npm run query -- "matches -> by_tournament"
 
 ---
 
+## MCP server
+
+`mcp_server.mjs` exposes the model to [MCP](https://modelcontextprotocol.io) clients
+(Claude Code, Claude Desktop, etc.) over **stdio**. `.mcp.json` registers it as the
+`worldcup` server, so a client that reads that file picks it up automatically; you can
+also start it manually with `npm run mcp`.
+
+It exposes **two** tools:
+
+| Tool | What it does |
+|---|---|
+| `describe_model` | Returns the full `worldcup.malloy` source — sources, joins, measures, views. Call this first. |
+| `run_malloy_query` | Runs a Malloy expression against the model, e.g. `"goals -> top_scorers"` or an ad-hoc `"matches -> { group_by: tournament_name; aggregate: match_count is count() }"`. |
+
+**All queries go through the Malloy semantic model** — there is intentionally no
+raw-SQL tool, so the agent can't bypass the model's joins, measures, and views.
+
+Like the CLI runner, the server uses the core `@malloydata/*` libraries (no separate
+process or port) and resolves `data/parquet/*` relative to its own location, so run
+`python3 ingest.py` once and it works from any clone.
+
+---
+
 ## Project layout
 
 ```
@@ -159,6 +182,8 @@ worldcup/
 ├── worldcup.malloy    # the semantic model (sources, joins, measures, views)
 ├── explore.malloy     # example run: queries
 ├── run.mjs            # Node-26-proof query runner (uses @malloydata libs)
+├── mcp_server.mjs     # stdio MCP server (describe_model + run_malloy_query)
+├── .mcp.json          # registers the `worldcup` MCP server
 ├── package.json       # npm scripts + Malloy deps
 └── data/              # (git-ignored, regenerable)
     ├── csv/           # raw CSV cache
