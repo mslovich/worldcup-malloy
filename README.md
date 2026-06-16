@@ -13,22 +13,24 @@ and queried with DuckDB.
 
 ## Quick start
 
+The data ships with the repo (`data/parquet/*.parquet`, ~1.5 MB, committed), so a
+fresh clone works immediately — no download step:
+
 ```bash
-# 1. Python deps for ingest/validate
-pip install duckdb
-
-# 2. Pull the data → data/parquet/*.parquet  (~25s)
-python3 ingest.py
-
-# 3. Check referential integrity
-python3 validate.py
-
-# 4. Node deps for the Malloy runner
+# 1. Node deps for the Malloy runner
 npm install
 
-# 5. Run a query
+# 2. Run a query
 npm run query -- "goals -> top_scorers"
 npm run topscorers
+```
+
+**Refreshing the data is optional** — only needed to pull upstream updates or
+regenerate from scratch (requires `pip install duckdb`):
+
+```bash
+python3 ingest.py     # re-download CSVs → data/parquet/*.parquet  (~25s)
+python3 validate.py   # check referential integrity
 ```
 
 ---
@@ -52,7 +54,10 @@ python3 ingest.py --tables matches,goals
 ```
 
 Raw CSVs are cached under `data/csv/`; typed Parquet lands in `data/parquet/`.
-Both are git-ignored (regenerable).
+The `data/parquet/` files are **committed to the repo** (so clones and Malloy
+Publisher work without an ingest step); the larger raw `data/csv/` cache is
+git-ignored. Re-running `ingest.py` overwrites the Parquet in place — commit the
+result to publish refreshed data.
 
 ---
 
@@ -168,8 +173,8 @@ It exposes **two** tools:
 raw-SQL tool, so the agent can't bypass the model's joins, measures, and views.
 
 Like the CLI runner, the server uses the core `@malloydata/*` libraries (no separate
-process or port) and resolves `data/parquet/*` relative to its own location, so run
-`python3 ingest.py` once and it works from any clone.
+process or port) and resolves `data/parquet/*` relative to its own location. Since the
+Parquet is committed, it works from any clone with no ingest step.
 
 ---
 
@@ -184,8 +189,9 @@ worldcup/
 ├── run.mjs            # Node-26-proof query runner (uses @malloydata libs)
 ├── mcp_server.mjs     # stdio MCP server (describe_model + run_malloy_query)
 ├── .mcp.json          # registers the `worldcup` MCP server
+├── publisher.json     # Malloy Publisher package manifest (name/version/description)
 ├── package.json       # npm scripts + Malloy deps
-└── data/              # (git-ignored, regenerable)
-    ├── csv/           # raw CSV cache
-    └── parquet/       # one Parquet file per table
+└── data/
+    ├── csv/           # raw CSV cache (git-ignored, regenerable)
+    └── parquet/       # one Parquet file per table (committed — ships with the repo)
 ```
