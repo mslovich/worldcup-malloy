@@ -1,0 +1,5 @@
+{
+  "name": "worldcup",
+  "version": "1.0.0",
+  "description": "FIFA World Cup (Fjelstul World Cup Database) — every men's (1930–2022) and women's (1991–2019) World Cup match, goal, booking, squad and standing, modeled in Malloy over DuckDB/Parquet."
+}

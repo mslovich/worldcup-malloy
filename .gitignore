@@ -1,5 +1,9 @@
-# Generated data — regenerable from ingest.py (datapackage-driven)
-data/
+# Raw CSV cache — regenerable from ingest.py (datapackage-driven), kept out of git.
+data/csv/
+
+# NOTE: data/parquet/ IS tracked on purpose — Malloy Publisher (Malloyyo) clones
+# this repo and reads the Parquet directly, so the data must travel with the repo.
+# It's small (~1.5 MB) and regenerable via `python3 ingest.py`.
 
 # Node / malloy-cli
 node_modules/
