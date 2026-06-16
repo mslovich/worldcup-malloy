@@ -94,6 +94,7 @@ source: matches is duckdb.table('data/parquet/matches.parquet') extend {
       total_goals
       avg_goals
     order_by: first_year
+    limit: 100
   }
 
   view: highest_scoring is {
@@ -179,12 +180,14 @@ source: goals is duckdb.table('data/parquet/goals.parquet') extend {
     aggregate: goal_count
     where: minute_regulation is not null
     order_by: minute_regulation
+    limit: 130
   }
 
   view: by_tournament is {
     group_by: tournament_name
     aggregate: goal_count, penalty_goals, own_goals
     order_by: goal_count desc
+    limit: 100
   }
 }
 
@@ -209,6 +212,7 @@ source: bookings is duckdb.table('data/parquet/bookings.parquet') extend {
     group_by: tournament_name
     aggregate: yellow_cards, red_cards, sending_offs
     order_by: yellow_cards desc
+    limit: 100
   }
 }
 

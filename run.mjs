@@ -22,9 +22,13 @@ const { DuckDBConnection } = duckdb;
 
 const args = process.argv.slice(2);
 let model = "worldcup.malloy";
+// Malloy caps result rows at the fetch level (default 10), separate from any
+// SQL LIMIT — so set a high default here to avoid silently truncating output.
+let rowLimit = 5000;
 const positional = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--model") model = args[++i];
+  else if (args[i] === "--limit") rowLimit = Number(args[++i]);
   else positional.push(args[i]);
 }
 const query = positional.join(" ").trim();
@@ -41,7 +45,7 @@ const modelSrc = readFileSync(model, "utf-8");
 const fullSrc = `${modelSrc}\n\nrun: ${query}\n`;
 
 try {
-  const result = await runtime.loadQuery(fullSrc).run();
+  const result = await runtime.loadQuery(fullSrc).run({ rowLimit });
   // DuckDB sums come back as BigInt; coerce to Number for clean table output.
   const rows = result.data.toObject().map((row) =>
     Object.fromEntries(
