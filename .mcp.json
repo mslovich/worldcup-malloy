@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "worldcup": {
+      "command": "node",
+      "args": ["mcp_server.mjs"]
+    }
+  }
+}
