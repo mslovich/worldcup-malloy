@@ -1,0 +1,21 @@
+{
+  "name": "worldcup-malloy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Malloy semantic model over the Fjelstul FIFA World Cup database, backed by DuckDB/Parquet.",
+  "scripts": {
+    "ingest": "python3 ingest.py",
+    "validate": "python3 validate.py",
+    "query": "node run.mjs",
+    "topscorers": "node run.mjs \"goals -> top_scorers\"",
+    "by-tournament": "node run.mjs \"matches -> by_tournament\"",
+    "by-team": "node run.mjs \"team_appearances -> by_team\"",
+    "cli": "malloy-cli run explore.malloy"
+  },
+  "devDependencies": {
+    "@malloydata/malloy": "^0.0.412",
+    "@malloydata/db-duckdb": "^0.0.412",
+    "malloy-cli": "^0.0.38"
+  }
+}

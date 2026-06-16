@@ -1,0 +1,35 @@
+// FIFA World Cup — example analyses.
+// Run the whole file with:  npm run query   (alias for: malloy-cli run explore.malloy)
+// Or run a single query with malloy-cli's --query / -q flag by name.
+
+import "worldcup.malloy"
+
+// All-time top goal scorers (excludes own goals).
+run: goals -> top_scorers
+
+// Goals per match by tournament, oldest → newest.
+run: matches -> by_tournament
+
+// Team success table — appearances, W/D/L, goals.
+run: team_appearances -> by_team
+
+// Performance rolled up by confederation.
+run: team_appearances -> by_confederation
+
+// The highest-scoring matches in World Cup history.
+run: matches -> highest_scoring
+
+// When are goals scored? Distribution across regulation minutes.
+run: goals -> goals_by_minute
+
+// Discipline: cards by tournament.
+run: bookings -> by_tournament
+
+// Host nations and how they performed (performance label comes from the data).
+run: host_countries -> {
+  group_by:
+    host_year is tournaments.`year`
+    host is teams.team_name
+    performance
+  order_by: host_year
+}

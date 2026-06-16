@@ -1,0 +1,21 @@
+# Generated data — regenerable from ingest.py (datapackage-driven)
+data/
+
+# Node / malloy-cli
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# DuckDB scratch
+*.duckdb
+*.duckdb.wal
+*.tmp
+
+# Editor / OS
+.DS_Store
+.vscode/

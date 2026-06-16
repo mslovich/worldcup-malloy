@@ -1,0 +1,270 @@
+// FIFA World Cup (Fjelstul World Cup Database) — Malloy Model
+// Sources point directly at the Parquet files produced by ingest.py; no
+// separate database file is needed.
+//
+// Notes on the source data:
+//   * The data is heavily DENORMALIZED — most event tables already carry
+//     tournament_name / team_name / match_name inline. Joins below add the
+//     lookup dimensions and let measures roll up cleanly, but you rarely
+//     *need* them just to read a label.
+//   * Real join keys are the domain IDs (varchar): tournament_id, match_id,
+//     team_id, player_id, stadium_id, manager_id, referee_id. The `key_id`
+//     column in every table is just a per-table row surrogate.
+//   * Boolean-ish flags (win, draw, own_goal, penalty, home_team_win, …) are
+//     stored as 0/1 integers, so they sum directly into counts.
+
+// ─────────────────────────────────────────────────────────────────────────
+// Lookup / dimension sources
+// ─────────────────────────────────────────────────────────────────────────
+
+source: confederations is duckdb.table('data/parquet/confederations.parquet') extend {
+  primary_key: confederation_id
+  measure: confederation_count is count()
+}
+
+source: tournaments is duckdb.table('data/parquet/tournaments.parquet') extend {
+  primary_key: tournament_id
+  measure: tournament_count is count()
+}
+
+source: teams is duckdb.table('data/parquet/teams.parquet') extend {
+  primary_key: team_id
+  join_one: confederations with confederation_id
+  measure: team_count is count()
+}
+
+source: players is duckdb.table('data/parquet/players.parquet') extend {
+  primary_key: player_id
+  // Some players are mononyms; their given_name is the literal 'not applicable'.
+  dimension: full_name is
+    pick family_name
+    when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+  measure: player_count is count()
+}
+
+source: stadiums is duckdb.table('data/parquet/stadiums.parquet') extend {
+  primary_key: stadium_id
+  measure: stadium_count is count()
+}
+
+source: managers is duckdb.table('data/parquet/managers.parquet') extend {
+  primary_key: manager_id
+  dimension: full_name is
+    pick family_name when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+  measure: manager_count is count()
+}
+
+source: referees is duckdb.table('data/parquet/referees.parquet') extend {
+  primary_key: referee_id
+  dimension: full_name is
+    pick family_name when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+  measure: referee_count is count()
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// matches — central fact (one row per match)
+// ─────────────────────────────────────────────────────────────────────────
+
+source: matches is duckdb.table('data/parquet/matches.parquet') extend {
+  primary_key: match_id
+
+  join_one: tournaments with tournament_id
+  join_one: stadiums    with stadium_id
+
+  // -- Measures --
+  measure: match_count       is count()
+  measure: total_goals       is sum(home_team_score + away_team_score)
+  measure: avg_goals         is avg(home_team_score + away_team_score)
+  measure: extra_time_count  is sum(extra_time)
+  measure: shootout_count    is sum(penalty_shootout)
+
+  // -- Dimensions --
+  dimension: match_year   is tournaments.`year`
+  dimension: is_knockout  is knockout_stage = 1
+
+  // -- Named views --
+  view: by_tournament is {
+    group_by: tournament_name
+    aggregate:
+      first_year is min(match_year)
+      match_count
+      total_goals
+      avg_goals
+    order_by: first_year
+  }
+
+  view: highest_scoring is {
+    group_by:
+      match_name
+      match_date
+      tournament_name
+      goals is home_team_score + away_team_score
+    order_by: goals desc
+    limit: 15
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// team_appearances — one row per team per match (best source for team stats)
+// ─────────────────────────────────────────────────────────────────────────
+
+source: team_appearances is duckdb.table('data/parquet/team_appearances.parquet') extend {
+  primary_key: key_id
+
+  join_one: teams       with team_id
+  join_one: tournaments with tournament_id
+
+  // -- Measures --
+  measure: appearances       is count()
+  measure: wins              is sum(win)
+  measure: losses            is sum(lose)
+  measure: draws             is sum(draw)
+  measure: goals_scored      is sum(goals_for)
+  measure: goals_conceded    is sum(goals_against)
+  measure: goal_diff         is sum(goal_differential)
+
+  // -- Named views --
+  view: by_team is {
+    group_by: team_name
+    aggregate: appearances, wins, draws, losses, goals_scored, goals_conceded
+    order_by: wins desc
+    limit: 25
+  }
+
+  view: by_confederation is {
+    group_by: teams.confederation_name
+    aggregate: appearances, wins, draws, losses, goals_scored
+    order_by: wins desc
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// goals — one row per goal
+// ─────────────────────────────────────────────────────────────────────────
+
+source: goals is duckdb.table('data/parquet/goals.parquet') extend {
+  primary_key: goal_id
+
+  join_one: matches with match_id
+  join_one: teams   with team_id
+  join_one: players with player_id
+
+  // -- Measures --
+  measure: goal_count    is count()
+  measure: penalty_goals is sum(penalty)
+  measure: own_goals     is sum(own_goal)
+
+  // -- Dimensions --
+  dimension: scorer is
+    pick family_name
+    when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+
+  // -- Named views --
+  view: top_scorers is {
+    group_by: scorer
+    aggregate:
+      goal_count
+      penalty_goals
+    where: own_goal = 0
+    order_by: goal_count desc
+    limit: 20
+  }
+
+  view: goals_by_minute is {
+    group_by: minute_regulation
+    aggregate: goal_count
+    where: minute_regulation is not null
+    order_by: minute_regulation
+  }
+
+  view: by_tournament is {
+    group_by: tournament_name
+    aggregate: goal_count, penalty_goals, own_goals
+    order_by: goal_count desc
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Discipline & in-match events
+// ─────────────────────────────────────────────────────────────────────────
+
+source: bookings is duckdb.table('data/parquet/bookings.parquet') extend {
+  primary_key: booking_id
+
+  join_one: matches with match_id
+  join_one: teams   with team_id
+  join_one: players with player_id
+
+  measure: booking_count       is count()
+  measure: yellow_cards        is sum(yellow_card)
+  measure: red_cards           is sum(red_card)
+  measure: second_yellow_cards is sum(second_yellow_card)
+  measure: sending_offs        is sum(sending_off)
+
+  view: by_tournament is {
+    group_by: tournament_name
+    aggregate: yellow_cards, red_cards, sending_offs
+    order_by: yellow_cards desc
+  }
+}
+
+source: substitutions is duckdb.table('data/parquet/substitutions.parquet') extend {
+  primary_key: substitution_id
+  join_one: matches with match_id
+  join_one: teams   with team_id
+  measure: substitution_count is count()
+}
+
+source: penalty_kicks is duckdb.table('data/parquet/penalty_kicks.parquet') extend {
+  primary_key: penalty_kick_id
+  join_one: matches with match_id
+  join_one: teams   with team_id
+  join_one: players with player_id
+
+  measure: kick_count      is count()
+  measure: converted_count is sum(converted)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Standings, squads, hosts, awards (bridge / attribute tables)
+// ─────────────────────────────────────────────────────────────────────────
+
+source: tournament_standings is duckdb.table('data/parquet/tournament_standings.parquet') extend {
+  primary_key: key_id
+  join_one: tournaments with tournament_id
+  join_one: teams       with team_id
+  measure: entry_count is count()
+}
+
+source: group_standings is duckdb.table('data/parquet/group_standings.parquet') extend {
+  primary_key: key_id
+  join_one: tournaments with tournament_id
+  join_one: teams       with team_id
+  measure: entry_count is count()
+}
+
+source: squads is duckdb.table('data/parquet/squads.parquet') extend {
+  primary_key: key_id
+  join_one: tournaments with tournament_id
+  join_one: teams       with team_id
+  join_one: players     with player_id
+  measure: squad_slot_count is count()
+}
+
+source: host_countries is duckdb.table('data/parquet/host_countries.parquet') extend {
+  primary_key: key_id
+  join_one: tournaments with tournament_id
+  join_one: teams       with team_id
+  measure: host_count is count()
+}
+
+source: award_winners is duckdb.table('data/parquet/award_winners.parquet') extend {
+  primary_key: key_id
+  join_one: tournaments with tournament_id
+  join_one: teams       with team_id
+  measure: award_count is count()
+}
