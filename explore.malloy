@@ -1,14 +1,36 @@
 // FIFA World Cup — example analyses.
-// Run the whole file with:  npm run query   (alias for: malloy-cli run explore.malloy)
-// Or run a single query with malloy-cli's --query / -q flag by name.
+// Run a single query by name with run.mjs, e.g.:
+//   node run.mjs "goals -> top_scorers"
+// Or open this file in the VS Code Malloy extension and click ▶ on any run:.
 
 import "worldcup.malloy"
 
-// All-time top goal scorers (excludes own goals).
+// ── Goals ───────────────────────────────────────────────────────────────────
+
+// All-time top goal scorers (excludes own goals; mixes men's & women's).
 run: goals -> top_scorers
 
-// Goals per match by tournament, oldest → newest.
+// Top scorers who NEVER won a World Cup (bridges goals → tournament outcomes).
+run: goals -> top_scorers_never_won
+
+// Top women's-tournament scorers only (gender dimension in action).
+run: goals -> top_scorers + { where: gender = 'Women' }
+
+// When are goals scored? Distribution across regulation minutes.
+run: goals -> goals_by_minute
+
+// ── Matches ─────────────────────────────────────────────────────────────────
+
+// Goals per match by tournament, oldest → newest (correct for ALL years).
 run: matches -> by_tournament
+
+// The highest-scoring matches in World Cup history.
+run: matches -> highest_scoring
+
+// "Everything about one match at once" — goals + cards nested (USA 13–0 Thailand).
+run: matches -> match_dashboard + { where: match_id = 'M-2019-12' }
+
+// ── Teams ───────────────────────────────────────────────────────────────────
 
 // Team success table — appearances, W/D/L, goals.
 run: team_appearances -> by_team
@@ -16,20 +38,30 @@ run: team_appearances -> by_team
 // Performance rolled up by confederation.
 run: team_appearances -> by_confederation
 
-// The highest-scoring matches in World Cup history.
-run: matches -> highest_scoring
+// Most World Cup titles by nation.
+run: tournament_standings -> most_titles
 
-// When are goals scored? Distribution across regulation minutes.
-run: goals -> goals_by_minute
+// ── People: managers, referees, players ──────────────────────────────────────
 
-// Discipline: cards by tournament.
-run: bookings -> by_tournament
+// Managers with the most goals scored per game (team-match attribution).
+run: manager_appearances -> top_attacking_managers
 
-// Host nations and how they performed (performance label comes from the data).
+// Strictest referees by cards shown per match.
+run: referee_appearances -> strictest_referees
+
+// Discipline ∩ scoring: of players sent off, how many scored in that match?
+run: bookings -> {
+  where: sending_off = 1
+  aggregate:
+    sent_off   is booking_count
+    also_scored is booking_count { where: scored_in_match }
+}
+
+// Host nations and how they performed (label comes from the data).
 run: host_countries -> {
   group_by:
-    host_year is tournaments.`year`
-    host is teams.team_name
+    host_year is tournament.edition_year
+    host      is team.team_name
     performance
   order_by: host_year
 }
