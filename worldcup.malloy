@@ -1,20 +1,146 @@
-// FIFA World Cup (Fjelstul World Cup Database) — Malloy Model
-// Sources point directly at the Parquet files produced by ingest.py; no
-// separate database file is needed.
+// ════════════════════════════════════════════════════════════════════════════
+// FIFA World Cup — Malloy semantic model (Fjelstul World Cup Database)
+// ════════════════════════════════════════════════════════════════════════════
 //
-// Notes on the source data:
-//   * The data is heavily DENORMALIZED — most event tables already carry
-//     tournament_name / team_name / match_name inline. Joins below add the
-//     lookup dimensions and let measures roll up cleanly, but you rarely
-//     *need* them just to read a label.
-//   * Real join keys are the domain IDs (varchar): tournament_id, match_id,
-//     team_id, player_id, stadium_id, manager_id, referee_id. The `key_id`
-//     column in every table is just a per-table row surrogate.
-//   * Boolean-ish flags (win, draw, own_goal, penalty, home_team_win, …) are
-//     stored as 0/1 integers, so they sum directly into counts.
+// Sources point directly at the committed Parquet files (data/parquet/*.parquet);
+// no database file is needed. Covers every men's (1930–2022) and women's
+// (1991–2019) FIFA World Cup.
+//
+// ── How this model is organized ────────────────────────────────────────────
+// Layer 0  Base tables     <table>_base raw wrappers (measures + column dims,
+//                          NO joins) so cross-fact joins can reference a source
+//                          instead of a parquet path. They are leaves.
+// Layer 1  Dimensions      confederations, tournaments, teams, players,
+//                          stadiums, referees, managers — joined into the facts.
+// Layer 2  Facts (entry    matches (hub), goals, bookings, substitutions,
+//          points)         shootout_kicks, team_appearances, player_appearances,
+//                          manager_appearances, referee_appearances.
+// Layer 3  Tournament      tournament_standings, group_standings, squads,
+//          outcomes        host_countries, qualified_teams, awards, …
+// Honors   Career rollups  player_honors, manager_honors, team_honors —
+//                          pre-aggregated "did they win the Cup" sources.
+//
+// ── Four correlation grains (how to "join everything so it makes sense") ─────
+//   • match              match_id
+//   • team-match         (team_id, match_id)
+//   • player-match       (player_id, match_id)
+//   • tournament-team    (tournament_id, team_id)   ← who won / hosted / qualified
+//
+// ── Modeling rules baked in ─────────────────────────────────────────────────
+//   • Real join keys are the domain IDs (tournament_id, match_id, team_id,
+//     player_id, …); key_id is a per-table row surrogate only.
+//   • DIMENSION joins are source→source. CROSS-FACT joins (event↔event,
+//     manager↔team, honors) reference the leaf `<table>_base` source instead of
+//     the full source — this keeps the source graph acyclic and the joins clean.
+//   • Symmetric aggregates keep sums/counts correct across fan-out joins, BUT
+//     only if every join_one target has a primary_key and joins use real keys.
+//     Measures live in the `_base` source; the full source adds the primary_key,
+//     so rolled-up base measures (e.g. matches -> bookings.booking_count) still
+//     aggregate symmetrically on the full source's key.
+//     Never count() over a left join (counts the unmatched null row) — count the
+//     key, or reference a measure defined on the joined source.
+//   • gender is a TOURNAMENT attribute (a team_id like Brazil appears in both
+//     men's and women's data). Derived on each fact from its tournament_name,
+//     testing r'Women' before defaulting to 'Men'.
+//   • Boolean-ish flags (win, own_goal, penalty, yellow_card, …) are 0/1 ints
+//     that sum() straight into counts.
+//   • Mononyms (Pelé, Marta, Cafu) store given_name = 'not applicable'; the
+//     full_name / scorer dimensions handle this.
+//
+// ── Known data limitations ──────────────────────────────────────────────────
+//   • No attendance data (the summary CSVs are not ingested); only
+//     stadiums.stadium_capacity is available.
+//   • Lineups / positions (player_appearances) exist from 1970 onward only.
+//     Goals, bookings, results and standings cover every edition.
+// ════════════════════════════════════════════════════════════════════════════
+
 
 // ─────────────────────────────────────────────────────────────────────────
-// Lookup / dimension sources
+// Layer 0 — Base tables
+// Raw-table wrappers carrying column-derived measures/dimensions, with NO joins.
+// They exist so CROSS-FACT joins can reference `<table>_base` instead of a raw
+// duckdb.table(...) path; because they have no joins they are leaves and can be
+// referenced from anywhere below without creating cycles. The full sources in
+// Layers 1–3 `extend` these and add joins, primary keys, gender and views.
+// ─────────────────────────────────────────────────────────────────────────
+
+source: goals_base is duckdb.table('data/parquet/goals.parquet') extend {
+  measure: goal_count      is count()
+  measure: penalty_goals   is sum(penalty)
+  measure: own_goals       is sum(own_goal)
+  measure: open_play_goals is count() { where: own_goal = 0 and penalty = 0 }
+
+  dimension: scorer is
+    pick family_name when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+  dimension: minute_band is
+    pick '1-15'  when minute_regulation <= 15
+    pick '16-30' when minute_regulation <= 30
+    pick '31-45' when minute_regulation <= 45
+    pick '46-60' when minute_regulation <= 60
+    pick '61-75' when minute_regulation <= 75
+    pick '76-90' when minute_regulation <= 90
+    else '90+ (stoppage/ET)'
+}
+
+source: bookings_base is duckdb.table('data/parquet/bookings.parquet') extend {
+  measure: booking_count        is count()
+  measure: yellow_cards         is sum(yellow_card)
+  measure: second_yellow_cards  is sum(second_yellow_card)
+  measure: red_cards            is sum(red_card)
+  measure: sending_offs         is sum(sending_off)
+
+  dimension: card_type is
+    pick 'Red (straight)' when red_card = 1
+    pick 'Second yellow'  when second_yellow_card = 1
+    else 'Yellow'
+}
+
+source: team_appearances_base is duckdb.table('data/parquet/team_appearances.parquet') extend {
+  measure: appearances    is count()
+  measure: wins           is sum(win)
+  measure: losses         is sum(lose)
+  measure: draws          is sum(draw)
+  measure: goals_scored   is sum(goals_for)
+  measure: goals_conceded is sum(goals_against)
+  measure: goal_diff      is sum(goal_differential)
+  measure: clean_sheets   is count() { where: goals_against = 0 }
+  measure: win_pct        is sum(win) * 100.0 / count()
+}
+
+source: referee_appearances_base is duckdb.table('data/parquet/referee_appearances.parquet') extend {
+  measure: matches_officiated is count()
+  dimension: referee_name is
+    pick family_name when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+}
+
+source: matches_base is duckdb.table('data/parquet/matches.parquet') extend {
+  dimension: match_goals is home_team_score + away_team_score
+
+  measure: match_count        is count()
+  measure: total_goals        is sum(match_goals)
+  measure: avg_goals          is avg(match_goals)
+  measure: extra_time_matches is sum(extra_time)
+  measure: shootout_matches   is sum(penalty_shootout)
+}
+
+source: tournament_standings_base is duckdb.table('data/parquet/tournament_standings.parquet') extend {
+  measure: entry_count is count()
+  dimension: is_winner is position = 1
+}
+
+source: squads_base is duckdb.table('data/parquet/squads.parquet') extend {
+  measure: squad_slot_count is count()
+}
+
+source: manager_appointments_base is duckdb.table('data/parquet/manager_appointments.parquet') extend {
+  measure: appointment_count is count()
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// Layer 1 — Dimensions
 // ─────────────────────────────────────────────────────────────────────────
 
 source: confederations is duckdb.table('data/parquet/confederations.parquet') extend {
@@ -24,23 +150,14 @@ source: confederations is duckdb.table('data/parquet/confederations.parquet') ex
 
 source: tournaments is duckdb.table('data/parquet/tournaments.parquet') extend {
   primary_key: tournament_id
+
+  // The single source of truth for gender. "Women" contains no capital-M "Men",
+  // but we test Women first as the safe rule.
+  dimension: gender       is pick 'Women' when tournament_name ~ r'Women' else 'Men'
+  dimension: edition_year is `year`
+  dimension: decade       is floor(`year` / 10) * 10
+
   measure: tournament_count is count()
-}
-
-source: teams is duckdb.table('data/parquet/teams.parquet') extend {
-  primary_key: team_id
-  join_one: confederations with confederation_id
-  measure: team_count is count()
-}
-
-source: players is duckdb.table('data/parquet/players.parquet') extend {
-  primary_key: player_id
-  // Some players are mononyms; their given_name is the literal 'not applicable'.
-  dimension: full_name is
-    pick family_name
-    when given_name = 'not applicable'
-    else concat(given_name, ' ', family_name)
-  measure: player_count is count()
 }
 
 source: stadiums is duckdb.table('data/parquet/stadiums.parquet') extend {
@@ -48,44 +165,461 @@ source: stadiums is duckdb.table('data/parquet/stadiums.parquet') extend {
   measure: stadium_count is count()
 }
 
-source: managers is duckdb.table('data/parquet/managers.parquet') extend {
-  primary_key: manager_id
+source: teams is duckdb.table('data/parquet/teams.parquet') extend {
+  primary_key: team_id
+
+  join_one: confederations with confederation_id
+
+  measure: team_count is count()
+}
+
+// ── Career / honors rollups (tournament-team grain → per-person outcomes) ──
+// Pre-aggregated so the "did they ever win the World Cup" question is a plain
+// join, not a subquery the user has to rewrite. Built over the leaf base sources.
+
+source: player_honors is (
+  squads_base extend {
+    join_one: standing is tournament_standings_base
+      on tournament_id = standing.tournament_id and team_id = standing.team_id
+  } -> {
+    group_by: player_id
+    aggregate:
+      tournaments_played  is count()
+      titles_won          is count() { where: standing.position = 1 }
+      finals_reached      is count() { where: standing.position <= 2 }
+      semifinals_reached  is count() { where: standing.position <= 4 }
+  }
+)
+
+source: manager_honors is (
+  manager_appointments_base extend {
+    join_one: standing is tournament_standings_base
+      on tournament_id = standing.tournament_id and team_id = standing.team_id
+  } -> {
+    group_by: manager_id
+    aggregate:
+      tournaments_managed is count()
+      titles_won          is count() { where: standing.position = 1 }
+      finals_reached      is count() { where: standing.position <= 2 }
+  }
+)
+
+source: team_honors is (
+  tournament_standings_base -> {
+    group_by: team_id
+    aggregate:
+      titles_won     is count() { where: position = 1 }
+      finals_reached is count() { where: position <= 2 }
+      best_finish    is min(position)
+  }
+)
+
+source: players is duckdb.table('data/parquet/players.parquet') extend {
+  primary_key: player_id
+
+  join_one: honors is player_honors with player_id
+
   dimension: full_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
-  measure: manager_count is count()
+  dimension: is_female is female = 1
+  dimension: primary_position is
+    pick 'Goalkeeper' when goal_keeper = 1
+    pick 'Defender'   when defender = 1
+    pick 'Midfielder' when midfielder = 1
+    pick 'Forward'    when forward = 1
+    else 'Unknown'
+  // Null-safe: players never in a top-4 squad have no honors row.
+  dimension: titles_won          is coalesce(honors.titles_won, 0)
+  dimension: is_world_cup_winner is coalesce(honors.titles_won, 0) > 0
+
+  measure: player_count is count()
 }
 
 source: referees is duckdb.table('data/parquet/referees.parquet') extend {
   primary_key: referee_id
+
+  join_one: confederations with confederation_id
+
   dimension: full_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
+  dimension: is_female is female = 1
+
   measure: referee_count is count()
 }
 
+source: managers is duckdb.table('data/parquet/managers.parquet') extend {
+  primary_key: manager_id
+
+  join_one: honors is manager_honors with manager_id
+
+  dimension: full_name is
+    pick family_name when given_name = 'not applicable'
+    else concat(given_name, ' ', family_name)
+  dimension: is_female is female = 1
+  dimension: titles_won is coalesce(honors.titles_won, 0)
+  dimension: is_world_cup_winner is coalesce(honors.titles_won, 0) > 0
+
+  measure: manager_count is count()
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────
-// matches — central fact (one row per match)
+// Layer 2 — Facts (the query entry points)
 // ─────────────────────────────────────────────────────────────────────────
 
-source: matches is duckdb.table('data/parquet/matches.parquet') extend {
+// ── goals — one row per goal ───────────────────────────────────────────────
+source: goals is goals_base extend {
+  primary_key: goal_id
+
+  // Dimension joins. team_id = the team the goal counts FOR (the beneficiary,
+  // which is the OPPONENT for own goals); player_team_id = the scorer's own team.
+  join_one: tournament    is tournaments with tournament_id
+  join_one: scoring_team  is teams on team_id = scoring_team.team_id
+  join_one: player_team   is teams on player_team_id = player_team.team_id
+  join_one: scoring_player is players on player_id = scoring_player.player_id
+
+  // Cross-fact (player-match): was this scorer also disciplined in this match?
+  join_one: player_match_discipline is (
+    bookings_base -> {
+      group_by: match_id, player_id
+      aggregate: cards is count(), sendings_off is sum(sending_off)
+    }
+  ) on match_id = player_match_discipline.match_id
+    and player_id = player_match_discipline.player_id
+
+  // Cross-fact (match): who refereed the match this goal was scored in.
+  join_one: referee_of_match is (
+    referee_appearances_base -> {
+      group_by: match_id, referee_id, referee_name
+    }
+  ) on match_id = referee_of_match.match_id
+
+  // -- Dimensions (goal_count/penalty_goals/own_goals/scorer/minute_band from goals_base) --
+  dimension: is_penalty   is penalty = 1
+  dimension: is_own_goal  is own_goal = 1
+  dimension: is_knockout  is not (stage_name ~ r'group' or stage_name = 'final round')
+  dimension: scorer_was_booked   is coalesce(player_match_discipline.cards, 0) > 0
+  dimension: scorer_was_sent_off is coalesce(player_match_discipline.sendings_off, 0) > 0
+  dimension: referee_name is referee_of_match.referee_name
+
+  // -- Views --
+  view: top_scorers is {
+    group_by: scorer
+    aggregate: goal_count, penalty_goals
+    where: own_goal = 0
+    order_by: goal_count desc
+    limit: 20
+  }
+  // Top scorers who never won a World Cup (the cross-grain showcase).
+  view: top_scorers_never_won is {
+    group_by: scorer
+    aggregate: goal_count
+    where: own_goal = 0 and scoring_player.titles_won = 0
+    order_by: goal_count desc
+    limit: 20
+  }
+  view: goals_by_minute is {
+    group_by: minute_regulation
+    aggregate: goal_count
+    where: minute_regulation is not null
+    order_by: minute_regulation
+  }
+  view: by_tournament is {
+    group_by: tournament_name
+    aggregate: goal_count, penalty_goals, own_goals
+    order_by: tournament_name
+  }
+  view: by_confederation is {
+    group_by: scoring_team.confederations.confederation_name
+    aggregate: goal_count
+    where: own_goal = 0
+    order_by: goal_count desc
+  }
+}
+
+// ── bookings — one row per card / sending-off ──────────────────────────────
+source: bookings is bookings_base extend {
+  primary_key: booking_id
+
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: player     is players on player_id = player.player_id
+
+  // Cross-fact (player-match): did this booked player score in this match?
+  join_one: player_match_goals is (
+    goals_base -> {
+      group_by: match_id, player_id
+      aggregate: goals is count(), open_play is count() { where: own_goal = 0 }
+    }
+  ) on match_id = player_match_goals.match_id
+    and player_id = player_match_goals.player_id
+
+  // Cross-fact (match): who refereed — for cards-per-referee.
+  join_one: referee_of_match is (
+    referee_appearances_base -> {
+      group_by: match_id, referee_id, referee_name
+    }
+  ) on match_id = referee_of_match.match_id
+
+  // -- Dimensions (measures + card_type from bookings_base) --
+  dimension: is_knockout     is not (stage_name ~ r'group' or stage_name = 'final round')
+  dimension: scored_in_match is coalesce(player_match_goals.goals, 0) > 0
+  dimension: referee_name    is referee_of_match.referee_name
+
+  // -- Views --
+  view: dirtiest_matches is {
+    group_by: match_name, match_date, tournament_name
+    aggregate: booking_count, red_cards, sending_offs
+    order_by: booking_count desc
+    limit: 15
+  }
+  view: by_team is {
+    group_by: team.team_name
+    aggregate: booking_count, yellow_cards, red_cards
+    order_by: booking_count desc
+    limit: 25
+  }
+  view: by_tournament is {
+    group_by: tournament_name
+    aggregate: booking_count, yellow_cards, red_cards, sending_offs
+    order_by: tournament_name
+  }
+  view: cards_by_referee is {
+    group_by: referee_name
+    aggregate: booking_count, red_cards
+    order_by: booking_count desc
+    limit: 25
+  }
+}
+
+// ── substitutions — one row per player going off OR coming on ───────────────
+source: substitutions is duckdb.table('data/parquet/substitutions.parquet') extend {
+  primary_key: substitution_id
+
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: player     is players on player_id = player.player_id
+
+  measure: sub_events    is count()
+  measure: players_on    is sum(coming_on)
+  measure: players_off   is sum(going_off)
+
+  dimension: direction   is pick 'Coming on' when coming_on = 1 else 'Going off'
+  dimension: minute_band is
+    pick '1-45'  when minute_regulation <= 45
+    pick '46-60' when minute_regulation <= 60
+    pick '61-75' when minute_regulation <= 75
+    pick '76-90' when minute_regulation <= 90
+    else '90+ (stoppage/ET)'
+}
+
+// ── shootout_kicks — one row per penalty-shootout kick ─────────────────────
+// NOTE: in-play penalties (run of play) live in `goals` (penalty = 1). This
+// table is ONLY penalty-shootout kicks.
+source: shootout_kicks is duckdb.table('data/parquet/penalty_kicks.parquet') extend {
+  primary_key: penalty_kick_id
+
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: player     is players on player_id = player.player_id
+
+  measure: kick_count      is count()
+  measure: converted_count is sum(converted)
+  measure: conversion_rate is sum(converted) * 1.0 / count()
+
+  dimension: was_converted is converted = 1
+
+  view: by_team is {
+    group_by: team.team_name
+    aggregate: kick_count, converted_count, conversion_rate
+    order_by: kick_count desc
+    limit: 25
+  }
+}
+
+// ── team_appearances — one row per team per match (the team-match hub) ──────
+source: team_appearances is team_appearances_base extend {
+  primary_key: key_id
+
+  join_one: team       is teams on team_id = team.team_id
+  join_one: opponent   is teams on opponent_id = opponent.team_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: stadium    is stadiums with stadium_id
+
+  // -- Dimensions (W/D/L, goals, clean_sheets measures from team_appearances_base) --
+  dimension: is_home     is home_team = 1
+  dimension: is_knockout is knockout_stage = 1
+
+  // -- Views --
+  view: by_team is {
+    group_by: team.team_name
+    aggregate: appearances, wins, draws, losses, goals_scored, goals_conceded
+    order_by: wins desc
+    limit: 25
+  }
+  view: by_confederation is {
+    group_by: team.confederations.confederation_name
+    aggregate: appearances, wins, draws, losses, goals_scored
+    order_by: wins desc
+  }
+  view: head_to_head is {
+    group_by: team_name is team.team_name
+    group_by: opponent_name is opponent.team_name
+    aggregate: appearances, wins, draws, losses
+    order_by: appearances desc
+    limit: 50
+  }
+}
+
+// ── player_appearances — one row per player per match (lineups, 1970+) ──────
+source: player_appearances is duckdb.table('data/parquet/player_appearances.parquet') extend {
+  primary_key: key_id
+
+  join_one: player     is players on player_id = player.player_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: tournament is tournaments with tournament_id
+
+  // Cross-fact (team-match): the team's result/goals in this match.
+  join_one: team_match is team_appearances_base
+    on match_id = team_match.match_id and team_id = team_match.team_id
+  // Cross-fact (player-match): what this player did in this match.
+  join_one: player_match_goals is (
+    goals_base -> {
+      group_by: match_id, player_id
+      aggregate: goals is count()
+    }
+  ) on match_id = player_match_goals.match_id
+    and player_id = player_match_goals.player_id
+
+  measure: appearance_count is count()
+  measure: starts           is sum(starter)
+  measure: sub_appearances  is sum(substitute)
+  measure: players_used     is count(player_id)
+  measure: matches_played   is count(match_id)
+  measure: goals_conceded   is team_match.goals_against.sum()
+
+  dimension: is_starter is starter = 1
+  dimension: scored     is coalesce(player_match_goals.goals, 0) > 0
+}
+
+// ── manager_appearances — one row per manager per match (manager-match) ─────
+source: manager_appearances is duckdb.table('data/parquet/manager_appearances.parquet') extend {
+  primary_key: key_id
+
+  join_one: manager    is managers on manager_id = manager.manager_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: tournament is tournaments with tournament_id
+
+  // Cross-fact (team-match): the managed team's record/goals in this match.
+  join_one: managed_team is team_appearances_base
+    on match_id = managed_team.match_id and team_id = managed_team.team_id
+
+  measure: games_managed     is count()
+  measure: team_goals_for     is managed_team.goals_for.sum()
+  measure: team_goals_against is managed_team.goals_against.sum()
+  measure: wins               is managed_team.win.sum()
+  measure: goals_per_game     is managed_team.goals_for.sum() * 1.0 / count()
+  measure: win_pct            is managed_team.win.sum() * 100.0 / count()
+
+  dimension: is_knockout is not (stage_name ~ r'group' or stage_name = 'final round')
+
+  view: by_manager is {
+    group_by: manager.full_name
+    aggregate: games_managed, team_goals_for, goals_per_game, wins, win_pct
+    order_by: games_managed desc
+    limit: 25
+  }
+  view: top_attacking_managers is {
+    group_by: manager.full_name
+    aggregate: games_managed, goals_per_game
+    having: games_managed >= 15
+    order_by: goals_per_game desc
+    limit: 15
+  }
+}
+
+// ── referee_appearances — one row per match (referee-match) ─────────────────
+source: referee_appearances is referee_appearances_base extend {
   primary_key: match_id
 
-  join_one: tournaments with tournament_id
-  join_one: stadiums    with stadium_id
+  join_one: referee    is referees on referee_id = referee.referee_id
+  join_one: tournament is tournaments with tournament_id
 
-  // -- Measures --
-  measure: match_count       is count()
-  measure: total_goals       is sum(home_team_score + away_team_score)
-  measure: avg_goals         is avg(home_team_score + away_team_score)
-  measure: extra_time_count  is sum(extra_time)
-  measure: shootout_count    is sum(penalty_shootout)
+  // Cross-fact (match): the match's score/result/stage (1 row per match_id).
+  join_one: match is matches_base
+    on match_id = match.match_id
+  // Cross-fact (match): cards shown in matches this referee officiated.
+  join_one: match_discipline is (
+    bookings_base -> {
+      group_by: match_id
+      aggregate: cards is count(), reds is sum(red_card), sendings is sum(sending_off)
+    }
+  ) on match_id = match_discipline.match_id
+  // Cross-fact (match): goals scored in matches this referee officiated.
+  join_one: match_goals is (
+    goals_base -> {
+      group_by: match_id
+      aggregate: goals is count(), penalties is sum(penalty)
+    }
+  ) on match_id = match_goals.match_id
 
-  // -- Dimensions --
-  dimension: match_year   is tournaments.`year`
+  // matches_officiated comes from referee_appearances_base.
+  measure: cards_shown          is match_discipline.cards.sum()
+  measure: reds_shown           is match_discipline.reds.sum()
+  measure: cards_per_match      is match_discipline.cards.sum() * 1.0 / count()
+  measure: goals_in_matches     is match.home_team_score.sum() + match.away_team_score.sum()
+  measure: avg_goals_per_match  is (match.home_team_score.sum() + match.away_team_score.sum()) * 1.0 / count()
+  measure: penalties_awarded    is match_goals.penalties.sum()
+  measure: shootouts_officiated is match.penalty_shootout.sum()
+
+
+  view: by_referee is {
+    group_by: referee.full_name
+    aggregate: matches_officiated, goals_in_matches, avg_goals_per_match, cards_shown, cards_per_match
+    order_by: matches_officiated desc
+    limit: 25
+  }
+  view: strictest_referees is {
+    group_by: referee.full_name
+    aggregate: matches_officiated, cards_per_match
+    having: matches_officiated >= 5
+    order_by: cards_per_match desc
+    limit: 15
+  }
+}
+
+// ── matches — one row per match (the central hub) ──────────────────────────
+source: matches is matches_base extend {
+  primary_key: match_id
+
+  // Dimension joins.
+  join_one: tournament is tournaments with tournament_id
+  join_one: stadium    is stadiums with stadium_id
+  join_one: home_team  is teams on home_team_id = home_team.team_id
+  join_one: away_team  is teams on away_team_id = away_team.team_id
+  join_one: officials  is referee_appearances with match_id
+
+  // Event joins (match grain) — for roll-ups and the match dashboard. All on
+  // match_id only; symmetric aggregates keep the counts correct across years.
+  join_many: goals              on match_id = goals.match_id
+  join_many: bookings           on match_id = bookings.match_id
+  join_many: substitutions      on match_id = substitutions.match_id
+  join_many: team_appearances   on match_id = team_appearances.match_id
+  join_many: player_appearances on match_id = player_appearances.match_id
+
+  // -- Measures (match_count/total_goals/avg_goals/extra_time/shootouts from matches_base) --
+  measure: goals_recorded     is goals.goal_count
+  measure: cards_recorded     is bookings.booking_count
+
+  // -- Dimensions (match_goals from matches_base) --
+  dimension: match_year   is tournament.edition_year
+  dimension: decade       is tournament.decade
   dimension: is_knockout  is knockout_stage = 1
+  dimension: referee_name is officials.referee.full_name
 
-  // -- Named views --
+  // -- Views --
   view: by_tournament is {
     group_by: tournament_name
     aggregate:
@@ -94,181 +628,130 @@ source: matches is duckdb.table('data/parquet/matches.parquet') extend {
       total_goals
       avg_goals
     order_by: first_year
-    limit: 100
   }
-
   view: highest_scoring is {
-    group_by:
-      match_name
-      match_date
-      tournament_name
-      goals is home_team_score + away_team_score
+    group_by: match_name, match_date, tournament_name
+    aggregate: goals is sum(match_goals)
     order_by: goals desc
     limit: 15
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// team_appearances — one row per team per match (best source for team stats)
-// ─────────────────────────────────────────────────────────────────────────
-
-source: team_appearances is duckdb.table('data/parquet/team_appearances.parquet') extend {
-  primary_key: key_id
-
-  join_one: teams       with team_id
-  join_one: tournaments with tournament_id
-
-  // -- Measures --
-  measure: appearances       is count()
-  measure: wins              is sum(win)
-  measure: losses            is sum(lose)
-  measure: draws             is sum(draw)
-  measure: goals_scored      is sum(goals_for)
-  measure: goals_conceded    is sum(goals_against)
-  measure: goal_diff         is sum(goal_differential)
-
-  // -- Named views --
-  view: by_team is {
-    group_by: team_name
-    aggregate: appearances, wins, draws, losses, goals_scored, goals_conceded
-    order_by: wins desc
-    limit: 25
-  }
-
-  view: by_confederation is {
-    group_by: teams.confederation_name
-    aggregate: appearances, wins, draws, losses, goals_scored
-    order_by: wins desc
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// goals — one row per goal
-// ─────────────────────────────────────────────────────────────────────────
-
-source: goals is duckdb.table('data/parquet/goals.parquet') extend {
-  primary_key: goal_id
-
-  join_one: matches with match_id
-  join_one: teams   with team_id
-  join_one: players with player_id
-
-  // -- Measures --
-  measure: goal_count    is count()
-  measure: penalty_goals is sum(penalty)
-  measure: own_goals     is sum(own_goal)
-
-  // -- Dimensions --
-  dimension: scorer is
-    pick family_name
-    when given_name = 'not applicable'
-    else concat(given_name, ' ', family_name)
-
-  // -- Named views --
-  view: top_scorers is {
-    group_by: scorer
-    aggregate:
-      goal_count
-      penalty_goals
-    where: own_goal = 0
-    order_by: goal_count desc
-    limit: 20
-  }
-
-  view: goals_by_minute is {
-    group_by: minute_regulation
-    aggregate: goal_count
-    where: minute_regulation is not null
-    order_by: minute_regulation
-    limit: 130
-  }
-
-  view: by_tournament is {
+  // "Everything about these matches at once" — nest the events for a filtered
+  // set of matches (filter by match_id, tournament, team, etc. before running).
+  view: match_dashboard is {
+    group_by: match_name
+    group_by: match_date
     group_by: tournament_name
-    aggregate: goal_count, penalty_goals, own_goals
-    order_by: goal_count desc
-    limit: 100
+    aggregate: goals_recorded
+    aggregate: cards_recorded
+    nest: goals_scored is {
+      group_by: scorer is goals.scorer
+      group_by: scored_for is goals.team_name
+      aggregate: n is goals.goal_count
+    }
+    nest: cards_shown is {
+      group_by: booked is bookings.family_name
+      group_by: card_type is bookings.card_type
+      aggregate: n is bookings.booking_count
+    }
+    limit: 50
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Discipline & in-match events
-// ─────────────────────────────────────────────────────────────────────────
-
-source: bookings is duckdb.table('data/parquet/bookings.parquet') extend {
-  primary_key: booking_id
-
-  join_one: matches with match_id
-  join_one: teams   with team_id
-  join_one: players with player_id
-
-  measure: booking_count       is count()
-  measure: yellow_cards        is sum(yellow_card)
-  measure: red_cards           is sum(red_card)
-  measure: second_yellow_cards is sum(second_yellow_card)
-  measure: sending_offs        is sum(sending_off)
-
-  view: by_tournament is {
-    group_by: tournament_name
-    aggregate: yellow_cards, red_cards, sending_offs
-    order_by: yellow_cards desc
-    limit: 100
-  }
-}
-
-source: substitutions is duckdb.table('data/parquet/substitutions.parquet') extend {
-  primary_key: substitution_id
-  join_one: matches with match_id
-  join_one: teams   with team_id
-  measure: substitution_count is count()
-}
-
-source: penalty_kicks is duckdb.table('data/parquet/penalty_kicks.parquet') extend {
-  primary_key: penalty_kick_id
-  join_one: matches with match_id
-  join_one: teams   with team_id
-  join_one: players with player_id
-
-  measure: kick_count      is count()
-  measure: converted_count is sum(converted)
-}
 
 // ─────────────────────────────────────────────────────────────────────────
-// Standings, squads, hosts, awards (bridge / attribute tables)
+// Layer 3 — Tournament-outcome & structure sources
 // ─────────────────────────────────────────────────────────────────────────
 
-source: tournament_standings is duckdb.table('data/parquet/tournament_standings.parquet') extend {
+source: tournament_standings is tournament_standings_base extend {
   primary_key: key_id
-  join_one: tournaments with tournament_id
-  join_one: teams       with team_id
-  measure: entry_count is count()
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+
+  // entry_count / is_winner come from tournament_standings_base.
+
+  view: champions is {
+    group_by: tournament_name, team.team_name
+    where: position = 1
+    order_by: tournament_name
+  }
+  view: most_titles is {
+    group_by: team.team_name
+    aggregate: titles is count() { where: position = 1 }
+    having: titles > 0
+    order_by: titles desc
+  }
 }
 
 source: group_standings is duckdb.table('data/parquet/group_standings.parquet') extend {
   primary_key: key_id
-  join_one: tournaments with tournament_id
-  join_one: teams       with team_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
   measure: entry_count is count()
 }
 
-source: squads is duckdb.table('data/parquet/squads.parquet') extend {
+source: squads is squads_base extend {
   primary_key: key_id
-  join_one: tournaments with tournament_id
-  join_one: teams       with team_id
-  join_one: players     with player_id
-  measure: squad_slot_count is count()
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: player     is players on player_id = player.player_id
+  // Tournament-team outcome: how the squad's team finished.
+  join_one: standing is tournament_standings_base
+    on tournament_id = standing.tournament_id and team_id = standing.team_id
+
+  // squad_slot_count comes from squads_base.
+  dimension: won_this is coalesce(standing.position, 99) = 1
 }
 
 source: host_countries is duckdb.table('data/parquet/host_countries.parquet') extend {
   primary_key: key_id
-  join_one: tournaments with tournament_id
-  join_one: teams       with team_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
   measure: host_count is count()
+}
+
+source: qualified_teams is duckdb.table('data/parquet/qualified_teams.parquet') extend {
+  primary_key: key_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  measure: qualified_count is count()
 }
 
 source: award_winners is duckdb.table('data/parquet/award_winners.parquet') extend {
   primary_key: key_id
-  join_one: tournaments with tournament_id
-  join_one: teams       with team_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: player     is players on player_id = player.player_id
   measure: award_count is count()
+}
+
+source: awards is duckdb.table('data/parquet/awards.parquet') extend {
+  primary_key: award_id
+  measure: award_kind_count is count()
+}
+
+source: tournament_stages is duckdb.table('data/parquet/tournament_stages.parquet') extend {
+  primary_key: key_id
+  join_one: tournament is tournaments with tournament_id
+  measure: stage_count is count()
+}
+
+source: groups is duckdb.table('data/parquet/groups.parquet') extend {
+  primary_key: key_id
+  join_one: tournament is tournaments with tournament_id
+  measure: group_count is count()
+}
+
+source: manager_appointments is manager_appointments_base extend {
+  primary_key: key_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+  join_one: manager    is managers on manager_id = manager.manager_id
+  // appointment_count comes from manager_appointments_base.
+}
+
+source: referee_appointments is duckdb.table('data/parquet/referee_appointments.parquet') extend {
+  primary_key: key_id
+  join_one: tournament is tournaments with tournament_id
+  join_one: referee    is referees on referee_id = referee.referee_id
+  measure: appointment_count is count()
 }

@@ -72,37 +72,56 @@ result to publish refreshed data.
 | **Rosters & people** | `squads`, `manager_appointments`, `referee_appointments` |
 | **Awards** | `awards`, `award_winners` |
 
-### Keys & joins
+### Keys, grains & joins
 
 The data is **heavily denormalized** — most event tables already carry
 `tournament_name`, `team_name`, `match_name` etc. inline, so you rarely need a join
-just to read a label. The model adds joins so measures roll up cleanly.
+just to read a label. The model adds joins so measures roll up cleanly and so you can
+correlate facts that share an actor.
 
-Real join keys are the **domain IDs** (all `VARCHAR`, e.g. `WC-1930`):
+Real join keys are the **domain IDs** (all `VARCHAR`, e.g. `WC-1930`); the model
+correlates facts at **four grains**:
 
 ```
-matches            >── tournaments   ON tournament_id
-                   >── stadiums      ON stadium_id
-team_appearances   >── teams         ON team_id
-                   >── tournaments   ON tournament_id
-goals              >── matches       ON match_id
-                   >── teams         ON team_id
-                   >── players       ON player_id
-bookings / subs / penalty_kicks  >── matches, teams, players
-teams              >── confederations ON confederation_id
+match              match_id                  events within a match
+team-match         (team_id, match_id)       what a team did in a match
+player-match       (player_id, match_id)     what a player did in a match
+tournament-team    (tournament_id, team_id)  who hosted / qualified / WON an edition
 ```
 
-> Every table also has a `key_id` column — it's just a per-table row surrogate, **not**
-> a cross-table key. The model uses it as a primary key only for bridge tables that
-> have no single natural key (standings, squads, host_countries, …).
+Every fact source is a fully-dimensioned **entry point**: pick the one matching your
+question's grain (`goals` for goal questions, `bookings` for cards,
+`team_appearances` for team records, `matches` for match-level / dashboards) and slice
+by its dimensions. Cross-fact correlations (e.g. "players sent off who also scored")
+use composite-key joins that are baked in.
+
+> **Implementation note:** *dimension* lookups (`goals → teams`, `→ players`, …) are
+> source-to-source joins; *cross-fact* joins (event↔event, manager↔team, career honors)
+> join the raw `duckdb.table(...)` instead, which keeps the source graph acyclic and the
+> composite joins fan-out-free. `key_id` is a per-table row surrogate, **not** a
+> cross-table key.
 
 **Gotchas baked into the model:**
-- `year` is a reserved word in Malloy — reference the column as `` tournaments.`year` ``
-  (exposed as the `match_year` dimension on `matches`).
-- Boolean-ish flags (`win`, `draw`, `own_goal`, `penalty`, `home_team_win`, …) are
-  stored as `0/1` integers, so they `sum()` straight into counts.
-- Mononym players (Marta, Pelé, Ronaldo) have `given_name = 'not applicable'`; the
+- **Men's & women's are unified** — every fact exposes a `gender` dimension (derived
+  from the tournament). Default views (e.g. `top_scorers`) mix both; filter with
+  `where: gender = 'Women'` to separate them.
+- **`penalty` vs shootouts** — in-run-of-play penalties are in `goals` (`is_penalty`);
+  penalty-*shootout* kicks are the separate `shootout_kicks` source.
+- **Own goals** — `goals` separates `scoring_team` (counts for) from `player_team`
+  (scorer's side); `top_scorers` excludes own goals. Team goals come from
+  `team_appearances.goals_scored` (authoritative).
+- `year` is reserved in Malloy — exposed as `edition_year` on `tournaments` /
+  `match_year` on `matches`.
+- Boolean-ish flags (`win`, `own_goal`, `penalty`, `yellow_card`, …) are `0/1` ints and
+  `sum()` straight into counts.
+- Mononyms (Marta, Pelé, Cafu) have `given_name = 'not applicable'`; the
   `full_name` / `scorer` dimensions handle this.
+
+**Known data limitations:**
+- **No attendance data** (the summary CSVs aren't ingested); only
+  `stadiums.stadium_capacity` is available.
+- **Lineups / positions (`player_appearances`) exist from 1970 onward only.** Goals,
+  bookings, results and standings cover every edition.
 
 ---
 
@@ -116,12 +135,18 @@ Some named views:
 | Source | View | What it shows |
 |---|---|---|
 | `goals` | `top_scorers` | All-time top scorers (excl. own goals) |
+| `goals` | `top_scorers_never_won` | Top scorers who never won the Cup |
 | `goals` | `goals_by_minute` | Goal distribution across regulation minutes |
 | `matches` | `by_tournament` | Matches / goals / avg goals per edition |
 | `matches` | `highest_scoring` | Highest-scoring matches ever |
+| `matches` | `match_dashboard` | Goals + cards nested for filtered matches |
 | `team_appearances` | `by_team` | Appearances, W/D/L, goals per nation |
 | `team_appearances` | `by_confederation` | Same, rolled up by confederation |
-| `bookings` | `by_tournament` | Cards / sending-offs per edition |
+| `team_appearances` | `head_to_head` | Records by team vs opponent |
+| `tournament_standings` | `most_titles` | Most World Cup titles by nation |
+| `manager_appearances` | `top_attacking_managers` | Most goals/game under management |
+| `referee_appearances` | `strictest_referees` | Cards shown per match by referee |
+| `bookings` | `dirtiest_matches` / `cards_by_referee` | Discipline rollups |
 
 ---
 
