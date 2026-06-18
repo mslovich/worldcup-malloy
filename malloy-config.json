@@ -1,0 +1,8 @@
+{
+  "connections": {
+    "duckdb": {
+      "is": "duckdb",
+      "workingDirectory": { "malloyyo": "MALLOY_DATA_DIR" }
+    }
+  }
+}
