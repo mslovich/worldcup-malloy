@@ -1,0 +1,84 @@
+// index.malloy — hosted entry point for Malloyyo.
+//
+// Malloyyo always loads `index.malloy` at the repo root. This file pulls in the
+// full model from worldcup.malloy, RE-EXPORTS its sources (import alone does not
+// re-export — only things declared here are visible to consumers), and defines a
+// set of named example queries (the former `run:` statements from explore.malloy).
+
+import "worldcup.malloy"
+
+// ── Re-export the queryable sources from worldcup.malloy ─────────────────────
+// (The internal *_base building-block sources are intentionally left out.)
+export {
+  confederations, tournaments, tournament_stages, stadiums, teams,
+  player_honors, manager_honors, team_honors,
+  players, referees, managers,
+  goals, bookings, substitutions, shootout_kicks,
+  team_appearances, player_appearances, manager_appearances, referee_appearances,
+  matches, tournament_standings, group_standings, groups,
+  squads, host_countries, qualified_teams,
+  award_winners, awards,
+  manager_appointments, referee_appointments
+}
+
+// ── Named example queries (converted from explore.malloy's `run:` blocks) ────
+
+// Goals ──────────────────────────────────────────────────────────────────────
+
+#" All-time top goal scorers (excludes own goals; mixes men's & women's).
+query: top_scorers is goals -> top_scorers
+
+#" Top scorers who NEVER won a World Cup (bridges goals → tournament outcomes).
+query: top_scorers_never_won is goals -> top_scorers_never_won
+
+#" Top women's-tournament scorers only (the gender dimension in action).
+query: top_women_scorers is goals -> top_scorers + { where: tournament.gender = 'Women' }
+
+#" When are goals scored? Distribution across regulation minutes.
+query: goals_by_minute is goals -> goals_by_minute
+
+// Matches ─────────────────────────────────────────────────────────────────────
+
+#" Goals per match by tournament, oldest → newest (correct for ALL years).
+query: goals_per_match_by_tournament is matches -> by_tournament
+
+query: highest_scoring_matches is matches -> highest_scoring
+
+#" Everything about one match at once — goals + cards nested (USA 13–0 Thailand).
+query: match_dashboard_example is matches -> match_dashboard + { where: match_id = 'M-2019-12' }
+
+// Teams ───────────────────────────────────────────────────────────────────────
+
+#" Team success table — appearances, W/D/L, goals.
+query: team_success is team_appearances -> by_team
+
+#" Team performance rolled up by confederation.
+query: by_confederation is team_appearances -> by_confederation
+
+#" Most World Cup titles by nation.
+query: most_titles is tournament_standings -> most_titles
+
+// People: managers, referees, players ─────────────────────────────────────────
+
+#" Managers with the most goals scored per game (team-match attribution).
+query: top_attacking_managers is manager_appearances -> top_attacking_managers
+
+#" Strictest referees by cards shown per match.
+query: strictest_referees is referee_appearances -> strictest_referees
+
+#" Discipline ∩ scoring: of players sent off, how many scored in that match?
+query: sent_off_who_scored is bookings -> {
+  where: sending_off = 1
+  aggregate:
+    sent_off   is booking_count
+    also_scored is booking_count { where: scored_in_match }
+}
+
+#" Host nations and how they performed (label comes from the data).
+query: host_nation_performance is host_countries -> {
+  group_by:
+    host_year is tournament.edition_year
+    host      is team.team_name
+    performance
+  order_by: host_year
+}
