@@ -26,8 +26,8 @@ import duckdb from "@malloydata/db-duckdb";
 const { SingleConnectionRuntime } = malloy;
 const { DuckDBConnection } = duckdb;
 
-// Resolve paths relative to this file so `data/parquet/*` works no matter where
-// the server is launched from.
+// chdir to this file's directory so the model file resolves no matter where the
+// server is launched from. (The Parquet itself is read from GCS over httpfs.)
 const HERE = dirname(fileURLToPath(import.meta.url));
 process.chdir(HERE);
 

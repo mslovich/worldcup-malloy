@@ -13,8 +13,11 @@ and queried with DuckDB.
 
 ## Quick start
 
-The data ships with the repo (`data/parquet/*.parquet`, ~1.5 MB, committed), so a
-fresh clone works immediately — no download step:
+The model reads its Parquet directly from Google Cloud Storage
+(`https://storage.googleapis.com/malloyyo/worldcup/*.parquet`), so a fresh clone
+works immediately — no download step (just an internet connection). A committed
+copy also lives at `data/parquet/*.parquet` (~1.5 MB); that's the source that
+gets uploaded to GCS.
 
 ```bash
 # 1. Node deps for the Malloy runner
@@ -54,10 +57,17 @@ python3 ingest.py --tables matches,goals
 ```
 
 Raw CSVs are cached under `data/csv/`; typed Parquet lands in `data/parquet/`.
-The `data/parquet/` files are **committed to the repo** (so clones and Malloy
-Publisher work without an ingest step); the larger raw `data/csv/` cache is
-git-ignored. Re-running `ingest.py` overwrites the Parquet in place — commit the
-result to publish refreshed data.
+The `data/parquet/` files are **committed to the repo** (kept as the upload
+source); the larger raw `data/csv/` cache is git-ignored. Re-running `ingest.py`
+overwrites the Parquet in place.
+
+The Malloy model itself reads from Google Cloud Storage, so publishing refreshed
+data is a two-step flow — regenerate, then upload:
+
+```bash
+python3 ingest.py                                          # refresh data/parquet/*.parquet
+gsutil -m cp data/parquet/*.parquet gs://malloyyo/worldcup/  # publish to GCS
+```
 
 ---
 
@@ -198,8 +208,8 @@ It exposes **two** tools:
 raw-SQL tool, so the agent can't bypass the model's joins, measures, and views.
 
 Like the CLI runner, the server uses the core `@malloydata/*` libraries (no separate
-process or port) and resolves `data/parquet/*` relative to its own location. Since the
-Parquet is committed, it works from any clone with no ingest step.
+process or port). The model reads its Parquet from Google Cloud Storage over `httpfs`,
+so it works from any clone with no local data or ingest step.
 
 ---
 

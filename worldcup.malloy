@@ -2,8 +2,9 @@
 // FIFA World Cup — Malloy semantic model (Fjelstul World Cup Database)
 // ════════════════════════════════════════════════════════════════════════════
 //
-// Sources point directly at the committed Parquet files (data/parquet/*.parquet);
-// no database file is needed. Covers every men's (1930–2022) and women's
+// Sources point at the Parquet files hosted on Google Cloud Storage
+// (https://storage.googleapis.com/malloyyo/worldcup/*.parquet); no database file
+// is needed. Covers every men's (1930–2022) and women's
 // (1991–2019) FIFA World Cup.
 //
 // ── How this model is organized ────────────────────────────────────────────
@@ -64,7 +65,7 @@
 // Layers 1–3 `extend` these and add joins, primary keys, gender and views.
 // ─────────────────────────────────────────────────────────────────────────
 
-source: goals_base is duckdb.table('data/parquet/goals.parquet') extend {
+source: goals_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/goals.parquet') extend {
   measure: goal_count      is count()
   measure: penalty_goals   is sum(penalty)
   measure: own_goals       is sum(own_goal)
@@ -83,7 +84,7 @@ source: goals_base is duckdb.table('data/parquet/goals.parquet') extend {
     else '90+ (stoppage/ET)'
 }
 
-source: bookings_base is duckdb.table('data/parquet/bookings.parquet') extend {
+source: bookings_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/bookings.parquet') extend {
   measure: booking_count        is count()
   measure: yellow_cards         is sum(yellow_card)
   measure: second_yellow_cards  is sum(second_yellow_card)
@@ -96,7 +97,7 @@ source: bookings_base is duckdb.table('data/parquet/bookings.parquet') extend {
     else 'Yellow'
 }
 
-source: team_appearances_base is duckdb.table('data/parquet/team_appearances.parquet') extend {
+source: team_appearances_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/team_appearances.parquet') extend {
   measure: appearances    is count()
   measure: wins           is sum(win)
   measure: losses         is sum(lose)
@@ -108,14 +109,14 @@ source: team_appearances_base is duckdb.table('data/parquet/team_appearances.par
   measure: win_pct        is sum(win) * 100.0 / count()
 }
 
-source: referee_appearances_base is duckdb.table('data/parquet/referee_appearances.parquet') extend {
+source: referee_appearances_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referee_appearances.parquet') extend {
   measure: matches_officiated is count()
   dimension: referee_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
 }
 
-source: matches_base is duckdb.table('data/parquet/matches.parquet') extend {
+source: matches_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/matches.parquet') extend {
   dimension: match_goals is home_team_score + away_team_score
 
   measure: match_count        is count()
@@ -125,16 +126,16 @@ source: matches_base is duckdb.table('data/parquet/matches.parquet') extend {
   measure: shootout_matches   is sum(penalty_shootout)
 }
 
-source: tournament_standings_base is duckdb.table('data/parquet/tournament_standings.parquet') extend {
+source: tournament_standings_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/tournament_standings.parquet') extend {
   measure: entry_count is count()
   dimension: is_winner is position = 1
 }
 
-source: squads_base is duckdb.table('data/parquet/squads.parquet') extend {
+source: squads_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/squads.parquet') extend {
   measure: squad_slot_count is count()
 }
 
-source: manager_appointments_base is duckdb.table('data/parquet/manager_appointments.parquet') extend {
+source: manager_appointments_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/manager_appointments.parquet') extend {
   measure: appointment_count is count()
 }
 
@@ -143,12 +144,12 @@ source: manager_appointments_base is duckdb.table('data/parquet/manager_appointm
 // Layer 1 — Dimensions
 // ─────────────────────────────────────────────────────────────────────────
 
-source: confederations is duckdb.table('data/parquet/confederations.parquet') extend {
+source: confederations is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/confederations.parquet') extend {
   primary_key: confederation_id
   measure: confederation_count is count()
 }
 
-source: tournaments is duckdb.table('data/parquet/tournaments.parquet') extend {
+source: tournaments is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/tournaments.parquet') extend {
   primary_key: tournament_id
 
   // The single source of truth for gender. "Women" contains no capital-M "Men",
@@ -160,12 +161,12 @@ source: tournaments is duckdb.table('data/parquet/tournaments.parquet') extend {
   measure: tournament_count is count()
 }
 
-source: stadiums is duckdb.table('data/parquet/stadiums.parquet') extend {
+source: stadiums is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/stadiums.parquet') extend {
   primary_key: stadium_id
   measure: stadium_count is count()
 }
 
-source: teams is duckdb.table('data/parquet/teams.parquet') extend {
+source: teams is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/teams.parquet') extend {
   primary_key: team_id
 
   join_one: confederations with confederation_id
@@ -214,7 +215,7 @@ source: team_honors is (
   }
 )
 
-source: players is duckdb.table('data/parquet/players.parquet') extend {
+source: players is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/players.parquet') extend {
   primary_key: player_id
 
   join_one: honors is player_honors with player_id
@@ -236,7 +237,7 @@ source: players is duckdb.table('data/parquet/players.parquet') extend {
   measure: player_count is count()
 }
 
-source: referees is duckdb.table('data/parquet/referees.parquet') extend {
+source: referees is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referees.parquet') extend {
   primary_key: referee_id
 
   join_one: confederations with confederation_id
@@ -249,7 +250,7 @@ source: referees is duckdb.table('data/parquet/referees.parquet') extend {
   measure: referee_count is count()
 }
 
-source: managers is duckdb.table('data/parquet/managers.parquet') extend {
+source: managers is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/managers.parquet') extend {
   primary_key: manager_id
 
   join_one: honors is manager_honors with manager_id
@@ -395,7 +396,7 @@ source: bookings is bookings_base extend {
 }
 
 // ── substitutions — one row per player going off OR coming on ───────────────
-source: substitutions is duckdb.table('data/parquet/substitutions.parquet') extend {
+source: substitutions is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/substitutions.parquet') extend {
   primary_key: substitution_id
 
   join_one: tournament is tournaments with tournament_id
@@ -418,7 +419,7 @@ source: substitutions is duckdb.table('data/parquet/substitutions.parquet') exte
 // ── shootout_kicks — one row per penalty-shootout kick ─────────────────────
 // NOTE: in-play penalties (run of play) live in `goals` (penalty = 1). This
 // table is ONLY penalty-shootout kicks.
-source: shootout_kicks is duckdb.table('data/parquet/penalty_kicks.parquet') extend {
+source: shootout_kicks is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/penalty_kicks.parquet') extend {
   primary_key: penalty_kick_id
 
   join_one: tournament is tournaments with tournament_id
@@ -474,7 +475,7 @@ source: team_appearances is team_appearances_base extend {
 }
 
 // ── player_appearances — one row per player per match (lineups, 1970+) ──────
-source: player_appearances is duckdb.table('data/parquet/player_appearances.parquet') extend {
+source: player_appearances is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/player_appearances.parquet') extend {
   primary_key: key_id
 
   join_one: player     is players on player_id = player.player_id
@@ -505,7 +506,7 @@ source: player_appearances is duckdb.table('data/parquet/player_appearances.parq
 }
 
 // ── manager_appearances — one row per manager per match (manager-match) ─────
-source: manager_appearances is duckdb.table('data/parquet/manager_appearances.parquet') extend {
+source: manager_appearances is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/manager_appearances.parquet') extend {
   primary_key: key_id
 
   join_one: manager    is managers on manager_id = manager.manager_id
@@ -682,7 +683,7 @@ source: tournament_standings is tournament_standings_base extend {
   }
 }
 
-source: group_standings is duckdb.table('data/parquet/group_standings.parquet') extend {
+source: group_standings is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/group_standings.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
@@ -702,21 +703,21 @@ source: squads is squads_base extend {
   dimension: won_this is coalesce(standing.position, 99) = 1
 }
 
-source: host_countries is duckdb.table('data/parquet/host_countries.parquet') extend {
+source: host_countries is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/host_countries.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
   measure: host_count is count()
 }
 
-source: qualified_teams is duckdb.table('data/parquet/qualified_teams.parquet') extend {
+source: qualified_teams is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/qualified_teams.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
   measure: qualified_count is count()
 }
 
-source: award_winners is duckdb.table('data/parquet/award_winners.parquet') extend {
+source: award_winners is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/award_winners.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
@@ -724,18 +725,18 @@ source: award_winners is duckdb.table('data/parquet/award_winners.parquet') exte
   measure: award_count is count()
 }
 
-source: awards is duckdb.table('data/parquet/awards.parquet') extend {
+source: awards is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/awards.parquet') extend {
   primary_key: award_id
   measure: award_kind_count is count()
 }
 
-source: tournament_stages is duckdb.table('data/parquet/tournament_stages.parquet') extend {
+source: tournament_stages is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/tournament_stages.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   measure: stage_count is count()
 }
 
-source: groups is duckdb.table('data/parquet/groups.parquet') extend {
+source: groups is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/groups.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   measure: group_count is count()
@@ -749,7 +750,7 @@ source: manager_appointments is manager_appointments_base extend {
   // appointment_count comes from manager_appointments_base.
 }
 
-source: referee_appointments is duckdb.table('data/parquet/referee_appointments.parquet') extend {
+source: referee_appointments is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referee_appointments.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: referee    is referees on referee_id = referee.referee_id

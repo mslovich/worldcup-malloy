@@ -10,8 +10,9 @@
 //   node run.mjs "<query>"                  e.g. node run.mjs "goals -> top_scorers"
 //   node run.mjs --model worldcup.malloy "team_appearances -> by_team"
 //
-// The model's `duckdb.table('data/parquet/…')` paths resolve relative to the
-// current working directory, so run this from the project root.
+// The model reads its Parquet from Google Cloud Storage
+// (`duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/…')`), so this
+// works from anywhere — it just needs the model file and an internet connection.
 
 import { readFileSync } from "node:fs";
 import malloy from "@malloydata/malloy";
