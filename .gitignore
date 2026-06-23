@@ -23,3 +23,7 @@ venv/
 # Editor / OS
 .DS_Store
 .vscode/
+
+# Local MCP server configs — machine-specific absolute paths, not shared.
+.mcp.json
+explore.mcp.json

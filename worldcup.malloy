@@ -63,17 +63,24 @@
 // duckdb.table(...) path; because they have no joins they are leaves and can be
 // referenced from anywhere below without creating cycles. The full sources in
 // Layers 1–3 `extend` these and add joins, primary keys, gender and views.
+// (These *_base sources are internal building blocks — not re-exported.)
 // ─────────────────────────────────────────────────────────────────────────
 
 source: goals_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/goals.parquet') extend {
+  #" Number of goals (one row per goal).
   measure: goal_count      is count()
+  #" Goals scored from an in-play penalty kick.
   measure: penalty_goals   is sum(penalty)
+  #" Own goals.
   measure: own_goals       is sum(own_goal)
+  #" Goals from open play (excludes penalties and own goals).
   measure: open_play_goals is count() { where: own_goal = 0 and penalty = 0 }
 
+  #" Scorer's display name (handles mononyms such as Pelé, Marta).
   dimension: scorer is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
+  #" 15-minute band the goal fell in (1-15 … 90+ stoppage/ET).
   dimension: minute_band is
     pick '1-15'  when minute_regulation <= 15
     pick '16-30' when minute_regulation <= 30
@@ -85,12 +92,18 @@ source: goals_base is duckdb.table('https://storage.googleapis.com/malloyyo/worl
 }
 
 source: bookings_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/bookings.parquet') extend {
+  #" Number of cards / sendings-off (one row each).
   measure: booking_count        is count()
+  #" Yellow cards shown.
   measure: yellow_cards         is sum(yellow_card)
+  #" Second-yellow cards (a yellow that became a red).
   measure: second_yellow_cards  is sum(second_yellow_card)
+  #" Straight red cards.
   measure: red_cards            is sum(red_card)
+  #" Total sendings-off (straight red or second yellow).
   measure: sending_offs         is sum(sending_off)
 
+  #" Card type: Yellow, Second yellow, or Red (straight).
   dimension: card_type is
     pick 'Red (straight)' when red_card = 1
     pick 'Second yellow'  when second_yellow_card = 1
@@ -98,44 +111,65 @@ source: bookings_base is duckdb.table('https://storage.googleapis.com/malloyyo/w
 }
 
 source: team_appearances_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/team_appearances.parquet') extend {
+  #" Team-match appearances (one row per team per match).
   measure: appearances    is count()
+  #" Matches won.
   measure: wins           is sum(win)
+  #" Matches lost.
   measure: losses         is sum(lose)
+  #" Matches drawn.
   measure: draws          is sum(draw)
+  #" Goals scored (goals for).
   measure: goals_scored   is sum(goals_for)
+  #" Goals conceded (goals against).
   measure: goals_conceded is sum(goals_against)
+  #" Goal differential (scored − conceded).
   measure: goal_diff      is sum(goal_differential)
+  #" Matches with zero goals conceded.
   measure: clean_sheets   is count() { where: goals_against = 0 }
+  #" Win percentage (wins / appearances × 100).
   measure: win_pct        is sum(win) * 100.0 / count()
 }
 
 source: referee_appearances_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referee_appearances.parquet') extend {
+  #" Matches officiated (one row per match a referee took charge of).
   measure: matches_officiated is count()
+  #" Referee's display name (handles mononyms).
   dimension: referee_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
 }
 
 source: matches_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/matches.parquet') extend {
+  #" Total goals in the match (home + away).
   dimension: match_goals is home_team_score + away_team_score
 
+  #" Number of matches.
   measure: match_count        is count()
+  #" Total goals scored across matches.
   measure: total_goals        is sum(match_goals)
+  #" Average goals per match.
   measure: avg_goals          is avg(match_goals)
+  #" Matches that went to extra time.
   measure: extra_time_matches is sum(extra_time)
+  #" Matches decided by a penalty shootout.
   measure: shootout_matches   is sum(penalty_shootout)
 }
 
 source: tournament_standings_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/tournament_standings.parquet') extend {
+  #" Number of standings entries (team-tournament rows).
   measure: entry_count is count()
+  #" True for the tournament winner.
   dimension: is_winner is position = 1
 }
 
 source: squads_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/squads.parquet') extend {
+  #" Squad slots (one row per player per tournament squad).
   measure: squad_slot_count is count()
 }
 
 source: manager_appointments_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/manager_appointments.parquet') extend {
+  #" Number of manager appointments.
   measure: appointment_count is count()
 }
 
@@ -144,33 +178,48 @@ source: manager_appointments_base is duckdb.table('https://storage.googleapis.co
 // Layer 1 — Dimensions
 // ─────────────────────────────────────────────────────────────────────────
 
+#" Football confederations (UEFA, CONMEBOL, AFC, …).
+#(agent) Dimension table; referenced by teams and referees via join_one on confederation_id.
 source: confederations is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/confederations.parquet') extend {
   primary_key: confederation_id
+  #" Number of confederations.
   measure: confederation_count is count()
 }
 
+#" One row per World Cup edition (men's 1930–2022, women's 1991–2019). The single source of truth for gender, year and decade.
 source: tournaments is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/tournaments.parquet') extend {
   primary_key: tournament_id
 
   // The single source of truth for gender. "Women" contains no capital-M "Men",
   // but we test Women first as the safe rule.
+  #" 'Men' or 'Women' — the gender of the tournament.
+  #(agent) gender is a tournament attribute, not a team one — the same team_id (e.g. Brazil) appears in both men's and women's data.
   dimension: gender       is pick 'Women' when tournament_name ~ r'Women' else 'Men'
+  #" The year the tournament was held.
   dimension: edition_year is `year`
+  #" The decade the tournament was held (e.g. 1990).
   dimension: decade       is floor(`year` / 10) * 10
 
+  #" Number of tournaments / editions.
   measure: tournament_count is count()
 }
 
+#" Stadiums / venues, including stadium_capacity.
+#(agent) Dimension table.
 source: stadiums is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/stadiums.parquet') extend {
   primary_key: stadium_id
+  #" Number of stadiums.
   measure: stadium_count is count()
 }
 
+#" National teams.
+#(agent) Dimension table; joined to confederations on confederation_id.
 source: teams is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/teams.parquet') extend {
   primary_key: team_id
 
   join_one: confederations with confederation_id
 
+  #" Number of teams.
   measure: team_count is count()
 }
 
@@ -178,6 +227,8 @@ source: teams is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/
 // Pre-aggregated so the "did they ever win the World Cup" question is a plain
 // join, not a subquery the user has to rewrite. Built over the leaf base sources.
 
+#" Per-player career honors rollup: tournaments played, titles won, finals & semifinals reached.
+#(agent) Pre-aggregated to the player grain; joined into players as honors.
 source: player_honors is (
   squads_base extend {
     join_one: standing is tournament_standings_base
@@ -192,6 +243,8 @@ source: player_honors is (
   }
 )
 
+#" Per-manager career honors rollup: tournaments managed, titles won, finals reached.
+#(agent) Pre-aggregated to the manager grain; joined into managers as honors.
 source: manager_honors is (
   manager_appointments_base extend {
     join_one: standing is tournament_standings_base
@@ -205,6 +258,7 @@ source: manager_honors is (
   }
 )
 
+#" Per-team career honors rollup: titles won, finals reached, best finish (min position).
 source: team_honors is (
   tournament_standings_base -> {
     group_by: team_id
@@ -215,15 +269,20 @@ source: team_honors is (
   }
 )
 
+#" Players, with position, gender and an is_world_cup_winner flag.
+#(agent) Dimension table. titles_won / is_world_cup_winner are null-safe (coalesced from the honors join — 0/false for players never in a top-4 squad).
 source: players is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/players.parquet') extend {
   primary_key: player_id
 
   join_one: honors is player_honors with player_id
 
+  #" Player's display name (handles mononyms such as Pelé, Marta).
   dimension: full_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
+  #" True if the player is female.
   dimension: is_female is female = 1
+  #" Primary playing position (Goalkeeper, Defender, Midfielder, Forward).
   dimension: primary_position is
     pick 'Goalkeeper' when goal_keeper = 1
     pick 'Defender'   when defender = 1
@@ -231,37 +290,52 @@ source: players is duckdb.table('https://storage.googleapis.com/malloyyo/worldcu
     pick 'Forward'    when forward = 1
     else 'Unknown'
   // Null-safe: players never in a top-4 squad have no honors row.
+  #" World Cup titles won (0 if never in a winning squad).
   dimension: titles_won          is coalesce(honors.titles_won, 0)
+  #" True if the player ever won a World Cup.
   dimension: is_world_cup_winner is coalesce(honors.titles_won, 0) > 0
 
+  #" Number of players.
   measure: player_count is count()
 }
 
+#" Referees.
+#(agent) Dimension table; joined to confederations on confederation_id.
 source: referees is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referees.parquet') extend {
   primary_key: referee_id
 
   join_one: confederations with confederation_id
 
+  #" Referee's display name (handles mononyms).
   dimension: full_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
+  #" True if the referee is female.
   dimension: is_female is female = 1
 
+  #" Number of referees.
   measure: referee_count is count()
 }
 
+#" Managers, with an is_world_cup_winner flag.
+#(agent) Dimension table. titles_won / is_world_cup_winner are null-safe (coalesced from the honors join).
 source: managers is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/managers.parquet') extend {
   primary_key: manager_id
 
   join_one: honors is manager_honors with manager_id
 
+  #" Manager's display name (handles mononyms).
   dimension: full_name is
     pick family_name when given_name = 'not applicable'
     else concat(given_name, ' ', family_name)
+  #" True if the manager is female.
   dimension: is_female is female = 1
+  #" World Cup titles won as a manager (0 if none).
   dimension: titles_won is coalesce(honors.titles_won, 0)
+  #" True if the manager ever won a World Cup.
   dimension: is_world_cup_winner is coalesce(honors.titles_won, 0) > 0
 
+  #" Number of managers.
   measure: manager_count is count()
 }
 
@@ -271,6 +345,8 @@ source: managers is duckdb.table('https://storage.googleapis.com/malloyyo/worldc
 // ─────────────────────────────────────────────────────────────────────────
 
 // ── goals — one row per goal ───────────────────────────────────────────────
+#" One row per goal. Entry point for scoring analysis (scorers, penalties, own goals, minute).
+#(agent) team_id is the team the goal counts FOR (the beneficiary — the OPPONENT for own goals); player_team_id is the scorer's own team.
 source: goals is goals_base extend {
   primary_key: goal_id
 
@@ -298,14 +374,21 @@ source: goals is goals_base extend {
   ) on match_id = referee_of_match.match_id
 
   // -- Dimensions (goal_count/penalty_goals/own_goals/scorer/minute_band from goals_base) --
+  #" True for a goal scored from an in-play penalty.
   dimension: is_penalty   is penalty = 1
+  #" True for an own goal.
   dimension: is_own_goal  is own_goal = 1
+  #" True if the goal was scored in a knockout-stage match.
   dimension: is_knockout  is not (stage_name ~ r'group' or stage_name = 'final round')
+  #" True if the scorer was also booked in this match.
   dimension: scorer_was_booked   is coalesce(player_match_discipline.cards, 0) > 0
+  #" True if the scorer was also sent off in this match.
   dimension: scorer_was_sent_off is coalesce(player_match_discipline.sendings_off, 0) > 0
+  #" Name of the referee who officiated the match.
   dimension: referee_name is referee_of_match.referee_name
 
   // -- Views --
+  #" All-time top 20 goal scorers (excludes own goals; mixes men's & women's).
   view: top_scorers is {
     group_by: scorer
     aggregate: goal_count, penalty_goals
@@ -313,7 +396,8 @@ source: goals is goals_base extend {
     order_by: goal_count desc
     limit: 20
   }
-  // Top scorers who never won a World Cup (the cross-grain showcase).
+  #" Top 20 scorers who never won a World Cup.
+  #(agent) Cross-grain example: scoring (goals) filtered by tournament outcome (scoring_player.titles_won = 0).
   view: top_scorers_never_won is {
     group_by: scorer
     aggregate: goal_count
@@ -321,17 +405,20 @@ source: goals is goals_base extend {
     order_by: goal_count desc
     limit: 20
   }
+  #" Goal distribution across regulation minutes.
   view: goals_by_minute is {
     group_by: minute_regulation
     aggregate: goal_count
     where: minute_regulation is not null
     order_by: minute_regulation
   }
+  #" Goals, penalty goals and own goals per tournament.
   view: by_tournament is {
     group_by: tournament_name
     aggregate: goal_count, penalty_goals, own_goals
     order_by: tournament_name
   }
+  #" Goals by the scoring team's confederation.
   view: by_confederation is {
     group_by: scoring_team.confederations.confederation_name
     aggregate: goal_count
@@ -341,6 +428,7 @@ source: goals is goals_base extend {
 }
 
 // ── bookings — one row per card / sending-off ──────────────────────────────
+#" One row per card / sending-off. Entry point for discipline analysis (yellows, reds, sendings-off).
 source: bookings is bookings_base extend {
   primary_key: booking_id
 
@@ -365,28 +453,35 @@ source: bookings is bookings_base extend {
   ) on match_id = referee_of_match.match_id
 
   // -- Dimensions (measures + card_type from bookings_base) --
+  #" True if the card was shown in a knockout-stage match.
   dimension: is_knockout     is not (stage_name ~ r'group' or stage_name = 'final round')
+  #" True if the booked player also scored in this match.
   dimension: scored_in_match is coalesce(player_match_goals.goals, 0) > 0
+  #" Name of the referee who officiated the match.
   dimension: referee_name    is referee_of_match.referee_name
 
   // -- Views --
+  #" The 15 matches with the most cards.
   view: dirtiest_matches is {
     group_by: match_name, match_date, tournament_name
     aggregate: booking_count, red_cards, sending_offs
     order_by: booking_count desc
     limit: 15
   }
+  #" Cards by team (total, yellow, red).
   view: by_team is {
     group_by: team.team_name
     aggregate: booking_count, yellow_cards, red_cards
     order_by: booking_count desc
     limit: 25
   }
+  #" Cards per tournament (yellow, red, sendings-off).
   view: by_tournament is {
     group_by: tournament_name
     aggregate: booking_count, yellow_cards, red_cards, sending_offs
     order_by: tournament_name
   }
+  #" Cards (total and red) by referee.
   view: cards_by_referee is {
     group_by: referee_name
     aggregate: booking_count, red_cards
@@ -396,6 +491,7 @@ source: bookings is bookings_base extend {
 }
 
 // ── substitutions — one row per player going off OR coming on ───────────────
+#" One row per substitution event (a player coming on or going off).
 source: substitutions is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/substitutions.parquet') extend {
   primary_key: substitution_id
 
@@ -403,11 +499,16 @@ source: substitutions is duckdb.table('https://storage.googleapis.com/malloyyo/w
   join_one: team       is teams on team_id = team.team_id
   join_one: player     is players on player_id = player.player_id
 
+  #" Number of substitution events (a player coming on or going off).
   measure: sub_events    is count()
+  #" Players brought on.
   measure: players_on    is sum(coming_on)
+  #" Players taken off.
   measure: players_off   is sum(going_off)
 
+  #" Whether the player was 'Coming on' or 'Going off'.
   dimension: direction   is pick 'Coming on' when coming_on = 1 else 'Going off'
+  #" Time band the substitution fell in (1-45 … 90+ stoppage/ET).
   dimension: minute_band is
     pick '1-45'  when minute_regulation <= 45
     pick '46-60' when minute_regulation <= 60
@@ -419,6 +520,8 @@ source: substitutions is duckdb.table('https://storage.googleapis.com/malloyyo/w
 // ── shootout_kicks — one row per penalty-shootout kick ─────────────────────
 // NOTE: in-play penalties (run of play) live in `goals` (penalty = 1). This
 // table is ONLY penalty-shootout kicks.
+#" One row per penalty-shootout kick.
+#(agent) This source is ONLY shootout kicks; in-play penalties (run of play) live in `goals` with penalty = 1.
 source: shootout_kicks is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/penalty_kicks.parquet') extend {
   primary_key: penalty_kick_id
 
@@ -426,12 +529,17 @@ source: shootout_kicks is duckdb.table('https://storage.googleapis.com/malloyyo/
   join_one: team       is teams on team_id = team.team_id
   join_one: player     is players on player_id = player.player_id
 
+  #" Number of shootout kicks taken.
   measure: kick_count      is count()
+  #" Shootout kicks converted (scored).
   measure: converted_count is sum(converted)
+  #" Share of shootout kicks converted.
   measure: conversion_rate is sum(converted) * 1.0 / count()
 
+  #" True if the kick was scored.
   dimension: was_converted is converted = 1
 
+  #" Shootout kicks, conversions and conversion rate by team.
   view: by_team is {
     group_by: team.team_name
     aggregate: kick_count, converted_count, conversion_rate
@@ -441,6 +549,7 @@ source: shootout_kicks is duckdb.table('https://storage.googleapis.com/malloyyo/
 }
 
 // ── team_appearances — one row per team per match (the team-match hub) ──────
+#" One row per team per match — the team-match hub. W/D/L, goals for/against, clean sheets, win %.
 source: team_appearances is team_appearances_base extend {
   primary_key: key_id
 
@@ -450,21 +559,26 @@ source: team_appearances is team_appearances_base extend {
   join_one: stadium    is stadiums with stadium_id
 
   // -- Dimensions (W/D/L, goals, clean_sheets measures from team_appearances_base) --
+  #" True if the team played at home (home_team = 1).
   dimension: is_home     is home_team = 1
+  #" True if the match was in the knockout stage.
   dimension: is_knockout is knockout_stage = 1
 
   // -- Views --
+  #" Team success table — appearances, W/D/L, goals for/against.
   view: by_team is {
     group_by: team.team_name
     aggregate: appearances, wins, draws, losses, goals_scored, goals_conceded
     order_by: wins desc
     limit: 25
   }
+  #" Team performance rolled up by confederation.
   view: by_confederation is {
     group_by: team.confederations.confederation_name
     aggregate: appearances, wins, draws, losses, goals_scored
     order_by: wins desc
   }
+  #" Head-to-head record between each pair of teams.
   view: head_to_head is {
     group_by: team_name is team.team_name
     group_by: opponent_name is opponent.team_name
@@ -475,6 +589,7 @@ source: team_appearances is team_appearances_base extend {
 }
 
 // ── player_appearances — one row per player per match (lineups, 1970+) ──────
+#" One row per player per match (lineups; 1970 onward only). Starts, substitute appearances, whether they scored.
 source: player_appearances is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/player_appearances.parquet') extend {
   primary_key: key_id
 
@@ -494,18 +609,27 @@ source: player_appearances is duckdb.table('https://storage.googleapis.com/mallo
   ) on match_id = player_match_goals.match_id
     and player_id = player_match_goals.player_id
 
+  #" Player-match appearances (one row per player per match).
   measure: appearance_count is count()
+  #" Matches started.
   measure: starts           is sum(starter)
+  #" Appearances as a substitute.
   measure: sub_appearances  is sum(substitute)
+  #" Distinct players (counts player_id).
   measure: players_used     is count(player_id)
+  #" Distinct matches (counts match_id).
   measure: matches_played   is count(match_id)
+  #" Goals conceded by the player's team in the matches played.
   measure: goals_conceded   is team_match.goals_against.sum()
 
+  #" True if the player started the match.
   dimension: is_starter is starter = 1
+  #" True if the player scored in this match.
   dimension: scored     is coalesce(player_match_goals.goals, 0) > 0
 }
 
 // ── manager_appearances — one row per manager per match (manager-match) ─────
+#" One row per manager per match, with the managed team's result and goals. Win %, goals per game.
 source: manager_appearances is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/manager_appearances.parquet') extend {
   primary_key: key_id
 
@@ -517,21 +641,30 @@ source: manager_appearances is duckdb.table('https://storage.googleapis.com/mall
   join_one: managed_team is team_appearances_base
     on match_id = managed_team.match_id and team_id = managed_team.team_id
 
+  #" Matches managed (one row per manager per match).
   measure: games_managed     is count()
+  #" Goals scored by the managed team.
   measure: team_goals_for     is managed_team.goals_for.sum()
+  #" Goals conceded by the managed team.
   measure: team_goals_against is managed_team.goals_against.sum()
+  #" Matches won by the managed team.
   measure: wins               is managed_team.win.sum()
+  #" Goals scored per match managed.
   measure: goals_per_game     is managed_team.goals_for.sum() * 1.0 / count()
+  #" Win percentage (wins / games managed × 100).
   measure: win_pct            is managed_team.win.sum() * 100.0 / count()
 
+  #" True if the match was in the knockout stage.
   dimension: is_knockout is not (stage_name ~ r'group' or stage_name = 'final round')
 
+  #" Per-manager record: games managed, goals for, goals per game, wins, win %.
   view: by_manager is {
     group_by: manager.full_name
     aggregate: games_managed, team_goals_for, goals_per_game, wins, win_pct
     order_by: games_managed desc
     limit: 25
   }
+  #" Managers with the most goals scored per game (minimum 15 games managed).
   view: top_attacking_managers is {
     group_by: manager.full_name
     aggregate: games_managed, goals_per_game
@@ -542,6 +675,7 @@ source: manager_appearances is duckdb.table('https://storage.googleapis.com/mall
 }
 
 // ── referee_appearances — one row per match (referee-match) ─────────────────
+#" One row per match a referee officiated, with that match's cards, goals and result. Cards per match, goals per match.
 source: referee_appearances is referee_appearances_base extend {
   primary_key: match_id
 
@@ -567,21 +701,30 @@ source: referee_appearances is referee_appearances_base extend {
   ) on match_id = match_goals.match_id
 
   // matches_officiated comes from referee_appearances_base.
+  #" Total cards shown across matches officiated.
   measure: cards_shown          is match_discipline.cards.sum()
+  #" Red cards shown across matches officiated.
   measure: reds_shown           is match_discipline.reds.sum()
+  #" Average cards shown per match officiated.
   measure: cards_per_match      is match_discipline.cards.sum() * 1.0 / count()
+  #" Total goals scored in matches officiated.
   measure: goals_in_matches     is match.home_team_score.sum() + match.away_team_score.sum()
+  #" Average goals per match officiated.
   measure: avg_goals_per_match  is (match.home_team_score.sum() + match.away_team_score.sum()) * 1.0 / count()
+  #" Penalties (in-play) awarded in matches officiated.
   measure: penalties_awarded    is match_goals.penalties.sum()
+  #" Matches officiated that went to a penalty shootout.
   measure: shootouts_officiated is match.penalty_shootout.sum()
 
 
+  #" Per-referee totals: matches officiated, goals, average goals per match, cards.
   view: by_referee is {
     group_by: referee.full_name
     aggregate: matches_officiated, goals_in_matches, avg_goals_per_match, cards_shown, cards_per_match
     order_by: matches_officiated desc
     limit: 25
   }
+  #" Strictest referees — most cards shown per match (minimum 5 matches officiated).
   view: strictest_referees is {
     group_by: referee.full_name
     aggregate: matches_officiated, cards_per_match
@@ -592,6 +735,8 @@ source: referee_appearances is referee_appearances_base extend {
 }
 
 // ── matches — one row per match (the central hub) ──────────────────────────
+#" One row per match — the central hub for match-level analysis.
+#(agent) Joins every event fact (goals, bookings, substitutions, appearances) on match_id for roll-ups and the match dashboard.
 source: matches is matches_base extend {
   primary_key: match_id
 
@@ -611,16 +756,23 @@ source: matches is matches_base extend {
   join_many: player_appearances on match_id = player_appearances.match_id
 
   // -- Measures (match_count/total_goals/avg_goals/extra_time/shootouts from matches_base) --
+  #" Goals recorded in the match (from the goals fact).
   measure: goals_recorded     is goals.goal_count
+  #" Cards recorded in the match (from the bookings fact).
   measure: cards_recorded     is bookings.booking_count
 
   // -- Dimensions (match_goals from matches_base) --
+  #" The year the match was played.
   dimension: match_year   is tournament.edition_year
+  #" The decade the match was played.
   dimension: decade       is tournament.decade
+  #" True if the match was in the knockout stage.
   dimension: is_knockout  is knockout_stage = 1
+  #" Name of the referee who officiated the match.
   dimension: referee_name is officials.referee.full_name
 
   // -- Views --
+  #" Matches, total goals and goals-per-match by tournament, oldest → newest.
   view: by_tournament is {
     group_by: tournament_name
     aggregate:
@@ -630,6 +782,7 @@ source: matches is matches_base extend {
       avg_goals
     order_by: first_year
   }
+  #" The 15 highest-scoring matches in World Cup history.
   view: highest_scoring is {
     group_by: match_name, match_date, tournament_name
     aggregate: goals is sum(match_goals)
@@ -638,6 +791,8 @@ source: matches is matches_base extend {
   }
   // "Everything about these matches at once" — nest the events for a filtered
   // set of matches (filter by match_id, tournament, team, etc. before running).
+  #" Everything about a set of matches at once — goals and cards nested.
+  #(agent) Run this over a filtered set of matches: filter by match_id, tournament, or team before running it, not across every match.
   view: match_dashboard is {
     group_by: match_name
     group_by: match_date
@@ -663,6 +818,8 @@ source: matches is matches_base extend {
 // Layer 3 — Tournament-outcome & structure sources
 // ─────────────────────────────────────────────────────────────────────────
 
+#" Final tournament standings (one row per team per tournament).
+#(agent) position encodes the finish: 1 = champion, <= 2 = finalist, <= 4 = semifinalist.
 source: tournament_standings is tournament_standings_base extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
@@ -670,11 +827,13 @@ source: tournament_standings is tournament_standings_base extend {
 
   // entry_count / is_winner come from tournament_standings_base.
 
+  #" The champion of each tournament.
   view: champions is {
     group_by: tournament_name, team.team_name
     where: position = 1
     order_by: tournament_name
   }
+  #" Most World Cup titles by nation.
   view: most_titles is {
     group_by: team.team_name
     aggregate: titles is count() { where: position = 1 }
@@ -683,13 +842,16 @@ source: tournament_standings is tournament_standings_base extend {
   }
 }
 
+#" Group-stage standings (one row per team per group).
 source: group_standings is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/group_standings.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
+  #" Number of group-standings entries.
   measure: entry_count is count()
 }
 
+#" Tournament squads (one row per player per tournament squad), with how the squad's team finished.
 source: squads is squads_base extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
@@ -700,48 +862,62 @@ source: squads is squads_base extend {
     on tournament_id = standing.tournament_id and team_id = standing.team_id
 
   // squad_slot_count comes from squads_base.
+  #" True if the squad's team won the tournament.
   dimension: won_this is coalesce(standing.position, 99) = 1
 }
 
+#" Host nations per tournament.
 source: host_countries is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/host_countries.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
+  #" Number of host-country entries.
   measure: host_count is count()
 }
 
+#" Teams that qualified for each tournament.
 source: qualified_teams is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/qualified_teams.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
+  #" Number of qualified-team entries.
   measure: qualified_count is count()
 }
 
+#" Individual award winners (e.g. Golden Boot, Golden Ball) per tournament.
 source: award_winners is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/award_winners.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
   join_one: player     is players on player_id = player.player_id
+  #" Number of award wins.
   measure: award_count is count()
 }
 
+#" The catalog of award types.
 source: awards is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/awards.parquet') extend {
   primary_key: award_id
+  #" Number of award types.
   measure: award_kind_count is count()
 }
 
+#" The stages / rounds that make up each tournament.
 source: tournament_stages is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/tournament_stages.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
+  #" Number of stages.
   measure: stage_count is count()
 }
 
+#" The groups in each tournament's group stage.
 source: groups is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/groups.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
+  #" Number of groups.
   measure: group_count is count()
 }
 
+#" Manager appointments — which manager led which team at which tournament.
 source: manager_appointments is manager_appointments_base extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
@@ -750,9 +926,11 @@ source: manager_appointments is manager_appointments_base extend {
   // appointment_count comes from manager_appointments_base.
 }
 
+#" Referee appointments per tournament.
 source: referee_appointments is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referee_appointments.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: referee    is referees on referee_id = referee.referee_id
+  #" Number of referee appointments.
   measure: appointment_count is count()
 }
