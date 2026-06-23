@@ -53,6 +53,9 @@
 //     stadiums.stadium_capacity is available.
 //   • Lineups / positions (player_appearances) exist from 1970 onward only.
 //     Goals, bookings, results and standings cover every edition.
+//   • Minutes-played metrics (1970+) reconstruct match length as 90 (120 for extra
+//     time); red-card minutes aren't subtracted, and the few substitute appearances
+//     with no coming-on event default to minute 0.
 // ════════════════════════════════════════════════════════════════════════════
 
 
@@ -127,8 +130,9 @@ source: team_appearances_base is duckdb.table('https://storage.googleapis.com/ma
   measure: goal_diff      is sum(goal_differential)
   #" Matches with zero goals conceded.
   measure: clean_sheets   is count() { where: goals_against = 0 }
-  #" Win percentage (wins / appearances × 100).
-  measure: win_pct        is sum(win) * 100.0 / count()
+  #" Win percentage (wins / appearances).
+  # percent
+  measure: win_pct        is sum(win) * 1.0 / count()
 }
 
 source: referee_appearances_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/referee_appearances.parquet') extend {
@@ -171,6 +175,11 @@ source: squads_base is duckdb.table('https://storage.googleapis.com/malloyyo/wor
 source: manager_appointments_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/manager_appointments.parquet') extend {
   #" Number of manager appointments.
   measure: appointment_count is count()
+}
+
+source: substitutions_base is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/substitutions.parquet') extend {
+  #" Substitution events (a player coming on or going off).
+  measure: sub_event_count is count()
 }
 
 
@@ -340,6 +349,71 @@ source: managers is duckdb.table('https://storage.googleapis.com/malloyyo/worldc
 }
 
 
+// ── Canonical stage lookup (round ordering, defined ONCE) ──────────────────
+// Maps every stage_name — men's plural ("quarter-finals"), women's singular
+// ("quarter-final") and the 1950 round-robin "final round" — to an orderable
+// rank and a normalized label. Built from matches_base so it covers every
+// stage_name that appears in any fact. Join on stage_name to order rounds
+// correctly and to stop singular/plural splitting the same round into two rows.
+// NOTE: stage_rank is intentionally NOT injective — the third-place match shares
+// rank 5 with the semi-finals (both are semifinal-stage depth), so it sorts with the
+// semis and counts toward "semifinals reached" (see team_tournament_progress).
+// Do NOT derive is_knockout from stage_rank: 1950's "final round" is rank 6 but was a
+// round-robin, not a knockout — the facts' is_knockout deliberately excludes it.
+#" Canonical round lookup: stage_name → orderable stage_rank + normalized stage_label.
+#(agent) Join on stage_name. Use stage_rank to order/compare rounds (1 group … 6 final) and stage_label for display; this is the single source of round-ordering truth.
+source: stage_ref is (
+  matches_base -> { group_by: stage_name }
+) extend {
+  primary_key: stage_name
+  #" Orderable round depth (1 group … 6 final), comparable across editions.
+  dimension: stage_rank is
+    pick 2 when stage_name ~ r'second group'
+    pick 1 when stage_name ~ r'group'
+    pick 3 when stage_name ~ r'round of 16'
+    pick 4 when stage_name ~ r'quarter'
+    pick 5 when stage_name ~ r'semi'
+    pick 5 when stage_name ~ r'third'
+    pick 6 when stage_name = 'final round'
+    pick 6 when stage_name ~ r'final'
+    else 0
+  #" Normalized stage label (collapses singular/plural; names the 1950 final round).
+  dimension: stage_label is
+    pick 'Second group stage' when stage_name ~ r'second group'
+    pick 'Group stage'        when stage_name ~ r'group'
+    pick 'Round of 16'        when stage_name ~ r'round of 16'
+    pick 'Quarter-finals'     when stage_name ~ r'quarter'
+    pick 'Semi-finals'        when stage_name ~ r'semi'
+    pick 'Third-place match'  when stage_name ~ r'third'
+    pick 'Final round (1950)' when stage_name = 'final round'
+    pick 'Final'              when stage_name ~ r'final'
+    else stage_name
+}
+
+
+// ── Shared cross-fact rollups (defined ONCE, joined by name) ───────────────
+// Internal building blocks — NOT re-exported (like the *_base leaves). Each
+// collapses an event fact to a cross-fact grain so the SAME rollup isn't
+// re-derived inline in every fact that needs it.
+
+// goals collapsed to (match, player): scoring contribution per player per match.
+source: goals_by_player_match is goals_base -> {
+  group_by: match_id, player_id
+  aggregate:
+    goals         is count()
+    // Goals credited to the player's scoring record: EXCLUDES own goals but
+    // INCLUDES penalties (a converted penalty is a goal the player scored).
+    // NOT the same as goals_base.open_play_goals, which also excludes penalties.
+    scoring_goals is count() { where: own_goal = 0 }
+}
+
+// The officiating referee per match (name + confederation). One row per
+// match_id because referee_appearances has primary_key: match_id.
+source: match_referee_lookup is referee_appearances_base -> {
+  group_by: match_id, referee_id, referee_name, confederation_id
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────
 // Layer 2 — Facts (the query entry points)
 // ─────────────────────────────────────────────────────────────────────────
@@ -349,6 +423,9 @@ source: managers is duckdb.table('https://storage.googleapis.com/malloyyo/worldc
 #(agent) team_id is the team the goal counts FOR (the beneficiary — the OPPONENT for own goals); player_team_id is the scorer's own team.
 source: goals is goals_base extend {
   primary_key: goal_id
+
+  // Canonical round (orderable rank + normalized label) — see stage_ref.
+  join_one: stage_ref on stage_name = stage_ref.stage_name
 
   // Dimension joins. team_id = the team the goal counts FOR (the beneficiary,
   // which is the OPPONENT for own goals); player_team_id = the scorer's own team.
@@ -367,11 +444,7 @@ source: goals is goals_base extend {
     and player_id = player_match_discipline.player_id
 
   // Cross-fact (match): who refereed the match this goal was scored in.
-  join_one: referee_of_match is (
-    referee_appearances_base -> {
-      group_by: match_id, referee_id, referee_name
-    }
-  ) on match_id = referee_of_match.match_id
+  join_one: referee_of_match is match_referee_lookup on match_id = referee_of_match.match_id
 
   // -- Dimensions (goal_count/penalty_goals/own_goals/scorer/minute_band from goals_base) --
   #" True for a goal scored from an in-play penalty.
@@ -427,30 +500,76 @@ source: goals is goals_base extend {
   }
 }
 
+// ── player_match_scoring — one row per player per match they scored in ──────
+#" One row per player per match they scored in (own goals excluded). Entry point for hat-tricks, braces and multi-goal games.
+#(agent) Built from goals_base at the player-match grain; goals_in_match counts a player's non-own goals in the match, is_hat_trick is goals_in_match >= 3.
+source: player_match_scoring is (
+  goals_base -> {
+    where: own_goal = 0
+    group_by:
+      match_id
+      match_name
+      match_date
+      tournament_id
+      player_id
+      player_team_id
+    aggregate: goals_in_match is count()
+  }
+) extend {
+  join_one: player      is players on player_id = player.player_id
+  join_one: scoring_team is teams on player_team_id = scoring_team.team_id
+  join_one: tournament  is tournaments with tournament_id
+
+  #" True if the player scored 3+ goals in the match (a hat-trick).
+  dimension: is_hat_trick is goals_in_match >= 3
+  #" True if the player scored exactly 2 goals in the match (a brace).
+  dimension: is_brace     is goals_in_match = 2
+
+  #" Player-match scoring rows (one per player per match they scored in).
+  measure: scoring_match_count is count()
+  #" Hat-tricks (player-matches with 3+ goals).
+  measure: hat_trick_count     is count() { where: goals_in_match >= 3 }
+
+  #" Every hat-trick (3+ goals in a match) in World Cup history.
+  view: hat_tricks is {
+    where: goals_in_match >= 3
+    group_by:
+      scorer is player.full_name
+      team   is scoring_team.team_name
+      match_name
+      match_date
+      goals_in_match
+    order_by: goals_in_match desc, match_date
+  }
+  #" Players with the most career World Cup hat-tricks.
+  view: most_hat_tricks is {
+    group_by: player.full_name
+    aggregate: hat_trick_count
+    having: hat_trick_count > 0
+    order_by: hat_trick_count desc
+    limit: 15
+  }
+}
+
 // ── bookings — one row per card / sending-off ──────────────────────────────
 #" One row per card / sending-off. Entry point for discipline analysis (yellows, reds, sendings-off).
 source: bookings is bookings_base extend {
   primary_key: booking_id
+
+  // Canonical round (orderable rank + normalized label) — see stage_ref.
+  join_one: stage_ref on stage_name = stage_ref.stage_name
 
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
   join_one: player     is players on player_id = player.player_id
 
   // Cross-fact (player-match): did this booked player score in this match?
-  join_one: player_match_goals is (
-    goals_base -> {
-      group_by: match_id, player_id
-      aggregate: goals is count(), open_play is count() { where: own_goal = 0 }
-    }
-  ) on match_id = player_match_goals.match_id
+  join_one: player_match_goals is goals_by_player_match
+    on match_id = player_match_goals.match_id
     and player_id = player_match_goals.player_id
 
   // Cross-fact (match): who refereed — for cards-per-referee.
-  join_one: referee_of_match is (
-    referee_appearances_base -> {
-      group_by: match_id, referee_id, referee_name
-    }
-  ) on match_id = referee_of_match.match_id
+  join_one: referee_of_match is match_referee_lookup on match_id = referee_of_match.match_id
 
   // -- Dimensions (measures + card_type from bookings_base) --
   #" True if the card was shown in a knockout-stage match.
@@ -492,15 +611,17 @@ source: bookings is bookings_base extend {
 
 // ── substitutions — one row per player going off OR coming on ───────────────
 #" One row per substitution event (a player coming on or going off).
-source: substitutions is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/substitutions.parquet') extend {
+source: substitutions is substitutions_base extend {
   primary_key: substitution_id
+
+  // Canonical round (orderable rank + normalized label) — see stage_ref.
+  join_one: stage_ref on stage_name = stage_ref.stage_name
 
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
   join_one: player     is players on player_id = player.player_id
 
-  #" Number of substitution events (a player coming on or going off).
-  measure: sub_events    is count()
+  // sub_event_count (count of substitution events) is inherited from substitutions_base.
   #" Players brought on.
   measure: players_on    is sum(coming_on)
   #" Players taken off.
@@ -534,6 +655,7 @@ source: shootout_kicks is duckdb.table('https://storage.googleapis.com/malloyyo/
   #" Shootout kicks converted (scored).
   measure: converted_count is sum(converted)
   #" Share of shootout kicks converted.
+  # percent
   measure: conversion_rate is sum(converted) * 1.0 / count()
 
   #" True if the kick was scored.
@@ -544,6 +666,14 @@ source: shootout_kicks is duckdb.table('https://storage.googleapis.com/malloyyo/
     group_by: team.team_name
     aggregate: kick_count, converted_count, conversion_rate
     order_by: kick_count desc
+    limit: 25
+  }
+  #" Shootout record by player (most-active takers; min 2 kicks).
+  view: by_player is {
+    group_by: player.full_name, team.team_name
+    aggregate: kick_count, converted_count, conversion_rate
+    having: kick_count >= 2
+    order_by: kick_count desc, conversion_rate desc
     limit: 25
   }
 }
@@ -557,12 +687,27 @@ source: team_appearances is team_appearances_base extend {
   join_one: opponent   is teams on opponent_id = opponent.team_id
   join_one: tournament is tournaments with tournament_id
   join_one: stadium    is stadiums with stadium_id
+  // Cross-fact (match): the match's referee, for referee-vs-team confederation.
+  join_one: match_referee is match_referee_lookup on match_id = match_referee.match_id
+  // Canonical round (orderable rank + normalized label) — see stage_ref.
+  join_one: stage_ref on stage_name = stage_ref.stage_name
 
   // -- Dimensions (W/D/L, goals, clean_sheets measures from team_appearances_base) --
   #" True if the team played at home (home_team = 1).
   dimension: is_home     is home_team = 1
   #" True if the match was in the knockout stage.
   dimension: is_knockout is knockout_stage = 1
+  #" How the match was decided: Regulation, Extra time, or Shootout.
+  dimension: decided_by is
+    pick 'Shootout'   when penalty_shootout = 1
+    pick 'Extra time' when extra_time = 1
+    else 'Regulation'
+  #" True if the team and its opponent are from different confederations.
+  dimension: is_cross_confederation is
+    team.confederations.confederation_id != opponent.confederations.confederation_id
+  #" True if the match referee is from the same confederation as the team.
+  dimension: referee_same_confederation_as_team is
+    team.confederations.confederation_id = match_referee.confederation_id
 
   // -- Views --
   #" Team success table — appearances, W/D/L, goals for/against.
@@ -601,13 +746,24 @@ source: player_appearances is duckdb.table('https://storage.googleapis.com/mallo
   join_one: team_match is team_appearances_base
     on match_id = team_match.match_id and team_id = team_match.team_id
   // Cross-fact (player-match): what this player did in this match.
-  join_one: player_match_goals is (
-    goals_base -> {
-      group_by: match_id, player_id
-      aggregate: goals is count()
-    }
-  ) on match_id = player_match_goals.match_id
+  join_one: player_match_goals is goals_by_player_match
+    on match_id = player_match_goals.match_id
     and player_id = player_match_goals.player_id
+
+  // Cross-fact (player-match): when the player came on / went off, to derive
+  // minutes played. Aggregated to (match_id, player_id) so these stay join_one.
+  join_one: came_on is (
+    substitutions_base -> {
+      group_by: match_id, player_id
+      aggregate: at_minute is min(minute_regulation) { where: coming_on = 1 }
+    }
+  ) on match_id = came_on.match_id and player_id = came_on.player_id
+  join_one: went_off is (
+    substitutions_base -> {
+      group_by: match_id, player_id
+      aggregate: at_minute is min(minute_regulation) { where: going_off = 1 }
+    }
+  ) on match_id = went_off.match_id and player_id = went_off.player_id
 
   #" Player-match appearances (one row per player per match).
   measure: appearance_count is count()
@@ -622,10 +778,56 @@ source: player_appearances is duckdb.table('https://storage.googleapis.com/mallo
   #" Goals conceded by the player's team in the matches played.
   measure: goals_conceded   is team_match.goals_against.sum()
 
+  // ── Minutes played (1970+ only — that's when lineups begin). ───────────────
+  // No explicit match-length column exists, so full time = 90, or 120 when the
+  // match went to extra time. Starters enter at minute 0; substitutes enter when
+  // they came on; anyone substituted off exits then, else at full time.
+  // SIMPLIFICATION: minutes after a red-card sending-off are NOT subtracted
+  // (rare; could be refined later via bookings_base). goals_per_90 excludes own
+  // goals (scoring_goals) but includes penalties — the player's true scoring rate.
+  // Also: a few substitute appearances have no coming-on event in the data; they
+  // fall back to entered_minute 0 (credited from kickoff). Rare; not corrected.
+  #" Total minutes played across appearances (1970+).
+  measure: total_minutes    is minutes_played.sum()
+  #" Goals (excl. own goals) scored per 90 minutes played.
+  measure: goals_per_90     is player_match_goals.scoring_goals.sum() * 90.0 / nullif(minutes_played.sum(), 0)
+  #" Minutes played per goal scored (excl. own goals).
+  measure: minutes_per_goal is minutes_played.sum() * 1.0 / nullif(player_match_goals.scoring_goals.sum(), 0)
+
   #" True if the player started the match.
   dimension: is_starter is starter = 1
   #" True if the player scored in this match.
   dimension: scored     is coalesce(player_match_goals.goals, 0) > 0
+
+  // -- Minutes-played dimensions (per appearance) --
+  #" Full-time length of this match (120 if it went to extra time, else 90).
+  dimension: match_length   is 90 + 30 * coalesce(team_match.extra_time, 0)
+  #" Minute the player entered the pitch (0 for a starter).
+  dimension: entered_minute is pick 0 when starter = 1 else coalesce(came_on.at_minute, 0)
+  #" Minute the player left the pitch (full time if not substituted off).
+  dimension: exited_minute  is coalesce(went_off.at_minute, match_length)
+  #" Minutes the player was on the pitch in this match (1970+).
+  dimension: minutes_played is exited_minute - entered_minute
+
+  // -- Views --
+  #" Most minutes played in World Cup history (1970+).
+  view: minutes_leaders is {
+    group_by: player.full_name
+    aggregate: matches_played, total_minutes
+    order_by: total_minutes desc
+    limit: 25
+  }
+  #" Best goals per 90 among players with real minutes (1970+, min 270 minutes).
+  view: top_goals_per_90 is {
+    group_by: player.full_name
+    aggregate:
+      total_minutes
+      goals is player_match_goals.scoring_goals.sum()
+      goals_per_90
+    having: total_minutes >= 270
+    order_by: goals_per_90 desc
+    limit: 20
+  }
 }
 
 // ── manager_appearances — one row per manager per match (manager-match) ─────
@@ -640,6 +842,8 @@ source: manager_appearances is duckdb.table('https://storage.googleapis.com/mall
   // Cross-fact (team-match): the managed team's record/goals in this match.
   join_one: managed_team is team_appearances_base
     on match_id = managed_team.match_id and team_id = managed_team.team_id
+  // Canonical round (orderable rank + normalized label) — see stage_ref.
+  join_one: stage_ref on stage_name = stage_ref.stage_name
 
   #" Matches managed (one row per manager per match).
   measure: games_managed     is count()
@@ -651,8 +855,9 @@ source: manager_appearances is duckdb.table('https://storage.googleapis.com/mall
   measure: wins               is managed_team.win.sum()
   #" Goals scored per match managed.
   measure: goals_per_game     is managed_team.goals_for.sum() * 1.0 / count()
-  #" Win percentage (wins / games managed × 100).
-  measure: win_pct            is managed_team.win.sum() * 100.0 / count()
+  #" Win percentage (wins / games managed).
+  # percent
+  measure: win_pct            is managed_team.win.sum() * 1.0 / count()
 
   #" True if the match was in the knockout stage.
   dimension: is_knockout is not (stage_name ~ r'group' or stage_name = 'final round')
@@ -742,6 +947,8 @@ source: matches is matches_base extend {
 
   // Dimension joins.
   join_one: tournament is tournaments with tournament_id
+  // Canonical round (orderable rank + normalized label) — see stage_ref.
+  join_one: stage_ref  on stage_name = stage_ref.stage_name
   join_one: stadium    is stadiums with stadium_id
   join_one: home_team  is teams on home_team_id = home_team.team_id
   join_one: away_team  is teams on away_team_id = away_team.team_id
@@ -770,6 +977,21 @@ source: matches is matches_base extend {
   dimension: is_knockout  is knockout_stage = 1
   #" Name of the referee who officiated the match.
   dimension: referee_name is officials.referee.full_name
+  #" The scoreline as home–away (e.g. '2-1').
+  dimension: scoreline is concat(home_team_score::string, '-', away_team_score::string)
+  #" Scoreline with direction collapsed (higher–lower) so 2-1 and 1-2 bucket together.
+  dimension: scoreline_normalized is
+    pick concat(home_team_score::string, '-', away_team_score::string)
+      when home_team_score >= away_team_score
+    else concat(away_team_score::string, '-', home_team_score::string)
+  #" How the match was decided: Regulation, Extra time, or Shootout.
+  dimension: decided_by is
+    pick 'Shootout'   when penalty_shootout = 1
+    pick 'Extra time' when extra_time = 1
+    else 'Regulation'
+  #" True if the two teams are from different confederations.
+  dimension: is_cross_confederation is
+    home_team.confederations.confederation_id != away_team.confederations.confederation_id
 
   // -- Views --
   #" Matches, total goals and goals-per-match by tournament, oldest → newest.
@@ -842,6 +1064,45 @@ source: tournament_standings is tournament_standings_base extend {
   }
 }
 
+#" Per team-tournament: the furthest round the team reached (orderable rank + label).
+#(agent) max(stage_ref.stage_rank) over the team's matches in a tournament — the correct way to ask "how far did they get", avoiding the alphabetical max(stage_name) trap.
+source: team_tournament_progress is (
+  team_appearances_base extend {
+    join_one: stage_ref on stage_name = stage_ref.stage_name
+  } -> {
+    group_by: tournament_id, team_id
+    aggregate: furthest_stage_rank is max(stage_ref.stage_rank)
+  }
+) extend {
+  join_one: tournament is tournaments with tournament_id
+  join_one: team       is teams on team_id = team.team_id
+
+  #" Normalized name of the furthest round the team reached that tournament.
+  dimension: furthest_round is
+    pick 'Group stage'        when furthest_stage_rank <= 1
+    pick 'Second group stage' when furthest_stage_rank = 2
+    pick 'Round of 16'        when furthest_stage_rank = 3
+    pick 'Quarter-finals'     when furthest_stage_rank = 4
+    pick 'Semi-finals'        when furthest_stage_rank = 5
+    pick 'Final'              when furthest_stage_rank = 6
+    else 'Unknown'
+
+  #" Number of team-tournament rows.
+  measure: entry_count    is count()
+  #" Tournaments in which the team reached the final (rank 6).
+  measure: finals_reached is count() { where: furthest_stage_rank = 6 }
+  #" Tournaments in which the team reached the semi-finals or better (rank >= 5).
+  measure: semifinals_reached is count() { where: furthest_stage_rank >= 5 }
+
+  #" Per nation: tournaments entered, semis reached, finals reached.
+  view: by_team is {
+    group_by: team.team_name
+    aggregate: tournaments is count(), semifinals_reached, finals_reached
+    order_by: finals_reached desc, semifinals_reached desc
+    limit: 25
+  }
+}
+
 #" Group-stage standings (one row per team per group).
 source: group_standings is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/group_standings.parquet') extend {
   primary_key: key_id
@@ -884,21 +1145,30 @@ source: qualified_teams is duckdb.table('https://storage.googleapis.com/malloyyo
   measure: qualified_count is count()
 }
 
+#" The catalog of award types (defined before award_winners, which joins it).
+source: awards is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/awards.parquet') extend {
+  primary_key: award_id
+  #" Number of award types.
+  measure: award_kind_count is count()
+}
+
 #" Individual award winners (e.g. Golden Boot, Golden Ball) per tournament.
 source: award_winners is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/award_winners.parquet') extend {
   primary_key: key_id
   join_one: tournament is tournaments with tournament_id
   join_one: team       is teams on team_id = team.team_id
   join_one: player     is players on player_id = player.player_id
+  // award_name is already inline; this join adds award_description / year_introduced.
+  join_one: award      is awards on award_id = award.award_id
   #" Number of award wins.
   measure: award_count is count()
-}
 
-#" The catalog of award types.
-source: awards is duckdb.table('https://storage.googleapis.com/malloyyo/worldcup/awards.parquet') extend {
-  primary_key: award_id
-  #" Number of award types.
-  measure: award_kind_count is count()
+  #" Award winners grouped by award type (Golden Boot, Golden Ball, …) — self-describing.
+  view: by_award is {
+    group_by: award_name, award.award_description
+    aggregate: award_count
+    order_by: award_count desc
+  }
 }
 
 #" The stages / rounds that make up each tournament.

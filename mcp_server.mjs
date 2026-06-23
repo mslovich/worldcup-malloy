@@ -58,8 +58,9 @@ server.registerTool(
       "\"manager_appearances -> top_attacking_managers\", or an ad-hoc query like " +
       "\"matches -> { group_by: tournament_name; aggregate: match_count }\". " +
       "Fact sources are entry points by grain (goals, bookings, team_appearances, " +
-      "player_appearances, matches); every fact has a `gender` dimension (filter with " +
-      "`where: gender = 'Women'`). Call describe_model first to see sources, measures, and views.",
+      "player_appearances, matches); `gender` lives on `tournaments`, reachable from any " +
+      "fact via its tournament join (filter with `where: tournament.gender = 'Women'`). " +
+      "Call describe_model first to see sources, measures, and views.",
     inputSchema: {
       query: z.string().describe("Malloy query expression (the part after `run:`)"),
       limit: z.number().int().positive().optional().describe("Max rows to return (default 1000)"),

@@ -13,9 +13,9 @@ export {
   confederations, tournaments, tournament_stages, stadiums, teams,
   player_honors, manager_honors, team_honors,
   players, referees, managers,
-  goals, bookings, substitutions, shootout_kicks,
+  goals, player_match_scoring, bookings, substitutions, shootout_kicks,
   team_appearances, player_appearances, manager_appearances, referee_appearances,
-  matches, tournament_standings, group_standings, groups,
+  matches, tournament_standings, team_tournament_progress, group_standings, groups,
   squads, host_countries, qualified_teams,
   award_winners, awards,
   manager_appointments, referee_appointments
@@ -81,6 +81,43 @@ query: host_nation_performance is host_countries -> {
   order_by: host_year
 }
 
+// Player minutes & efficiency (1970+) ─────────────────────────────────────────
+
+#" Most minutes played in World Cup history (1970+; Messi, Maldini, Matthäus …).
+query: minutes_leaders is player_appearances -> minutes_leaders
+
+#" Best goals per 90 minutes among players with real minutes (1970+, min 270).
+query: top_goals_per_90 is player_appearances -> top_goals_per_90
+
+// Rounds, scorelines, hat-tricks, shootouts & awards ──────────────────────────
+
+#" Every hat-trick (3+ goals in a match) in World Cup history.
+query: hat_tricks is player_match_scoring -> hat_tricks
+
+#" How far each nation has gone — semis & finals reached (mixes men's & women's).
+query: furthest_rounds_by_team is team_tournament_progress -> by_team
+
+#" Best shootout takers by kicks taken and conversion rate.
+query: shootout_takers is shootout_kicks -> by_player
+
+#" Award winners by award type — self-describing (Golden Boot, Golden Ball, …).
+query: awards_by_type is award_winners -> by_award
+
+#" How World Cup matches were decided: regulation, extra time, or shootout.
+query: matches_decided_by is matches -> {
+  group_by: decided_by
+  aggregate: match_count
+  order_by: match_count desc
+}
+
+#" Goals by round, correctly ordered group → final (via the canonical stage_ref).
+query: goals_by_round is goals -> {
+  group_by: stage_ref.stage_rank, stage_ref.stage_label
+  aggregate: goal_count
+  where: own_goal = 0
+  order_by: stage_rank
+}
+
 // Above in a comment block because malloyyo doens't read queries yet
 ##|"
   // Sample built in queries
@@ -119,4 +156,14 @@ query: host_nation_performance is host_countries -> {
       performance
     order_by: host_year
   }
+
+  // Player minutes & efficiency (1970+) ─────────────────────────────────────────
+  query: minutes_leaders is player_appearances -> minutes_leaders
+  query: top_goals_per_90 is player_appearances -> top_goals_per_90
+
+  // Rounds, scorelines, hat-tricks, shootouts & awards ──────────────────────────
+  query: hat_tricks is player_match_scoring -> hat_tricks
+  query: furthest_rounds_by_team is team_tournament_progress -> by_team
+  query: shootout_takers is shootout_kicks -> by_player
+  query: awards_by_type is award_winners -> by_award
 |##
