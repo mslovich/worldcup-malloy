@@ -21,8 +21,6 @@ export {
   manager_appointments, referee_appointments
 }
 
-// ── Named example queries (converted from explore.malloy's `run:` blocks) ────
-
 // Goals ──────────────────────────────────────────────────────────────────────
 
 #" All-time top goal scorers (excludes own goals; mixes men's & women's).
@@ -82,3 +80,43 @@ query: host_nation_performance is host_countries -> {
     performance
   order_by: host_year
 }
+
+// Above in a comment block because malloyyo doens't read queries yet
+##|"
+  // Sample built in queries
+
+  // Goals ──────────────────────────────────────────────────────────────────────
+  query: top_scorers is goals -> top_scorers
+  query: top_scorers_never_won is goals -> top_scorers_never_won
+  query: top_women_scorers is goals -> top_scorers + { where: tournament.gender = 'Women' }
+  query: goals_by_minute is goals -> goals_by_minute
+
+  // Matches ─────────────────────────────────────────────────────────────────────
+  query: goals_per_match_by_tournament is matches -> by_tournament
+  query: highest_scoring_matches is matches -> highest_scoring
+  query: match_dashboard_example is matches -> match_dashboard + { where: match_id = 'M-2019-12' }
+
+  // Teams ───────────────────────────────────────────────────────────────────────
+  query: team_success is team_appearances -> by_team
+  query: by_confederation is team_appearances -> by_confederation
+  query: most_titles is tournament_standings -> most_titles
+
+  // People: managers, referees, players ─────────────────────────────────────────
+  query: top_attacking_managers is manager_appearances -> top_attacking_managers
+  query: strictest_referees is referee_appearances -> strictest_referees
+  //" Discipline ∩ scoring: of players sent off, how many scored in that match?
+  query: sent_off_who_scored is bookings -> {
+    where: sending_off = 1
+    aggregate:
+      sent_off   is booking_count
+      also_scored is booking_count { where: scored_in_match }
+  }
+  // Host nations and how they performed (label comes from the data).
+  query: host_nation_performance is host_countries -> {
+    group_by:
+      host_year is tournament.edition_year
+      host      is team.team_name
+      performance
+    order_by: host_year
+  }
+|##
