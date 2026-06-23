@@ -112,11 +112,20 @@ use composite-key joins that are baked in.
 > cross-table key.
 
 **Gotchas baked into the model:**
-- **Men's & women's are unified** — every fact exposes a `gender` dimension (derived
-  from the tournament). Default views (e.g. `top_scorers`) mix both; filter with
-  `where: gender = 'Women'` to separate them.
+- **Men's & women's are unified** — `gender` is defined once, on `tournaments`, and
+  every fact reaches it through its tournament join. Default views (e.g.
+  `top_scorers`) mix both; filter with `where: tournament.gender = 'Women'` to
+  separate them.
 - **`penalty` vs shootouts** — in-run-of-play penalties are in `goals` (`is_penalty`);
   penalty-*shootout* kicks are the separate `shootout_kicks` source.
+- **Round ordering** — `stage_name` mixes singular ("quarter-final", women's) and
+  plural ("quarter-finals", men's) and sorts alphabetically (Final < Quarter-…).
+  Join `stage_ref` (on `stage_name`) for an orderable `stage_rank` (1 group … 6
+  final) and a normalized `stage_label`; `team_tournament_progress` rolls this up
+  to the furthest round each nation reached. `matches`/`team_appearances` also
+  expose `decided_by` (Regulation/Extra time/Shootout) and `is_cross_confederation`.
+  Note: the third-place match shares `stage_rank` 5 with the semi-finals (both are
+  semifinal-stage depth), so it sorts with the semis and counts as "semis reached".
 - **Own goals** — `goals` separates `scoring_team` (counts for) from `player_team`
   (scorer's side); `top_scorers` excludes own goals. Team goals come from
   `team_appearances.goals_scored` (authoritative).
@@ -132,6 +141,12 @@ use composite-key joins that are baked in.
   `stadiums.stadium_capacity` is available.
 - **Lineups / positions (`player_appearances`) exist from 1970 onward only.** Goals,
   bookings, results and standings cover every edition.
+- **Minutes-played metrics are 1970+ too.** `minutes_played` / `total_minutes` /
+  `goals_per_90` / `minutes_per_goal` are reconstructed from `player_appearances`
+  + `substitutions`, so they share the 1970+ window. Match length is taken as 90
+  minutes (120 when the match went to extra time — there is no explicit duration
+  column), and minutes after a red-card sending-off are not yet subtracted. A few
+  substitute appearances lack a coming-on event and default to minute 0.
 
 ---
 
@@ -157,6 +172,12 @@ Some named views:
 | `manager_appearances` | `top_attacking_managers` | Most goals/game under management |
 | `referee_appearances` | `strictest_referees` | Cards shown per match by referee |
 | `bookings` | `dirtiest_matches` / `cards_by_referee` | Discipline rollups |
+| `player_appearances` | `minutes_leaders` | Most minutes played ever (1970+) |
+| `player_appearances` | `top_goals_per_90` | Best goals per 90 (1970+, min 270 min) |
+| `player_match_scoring` | `hat_tricks` / `most_hat_tricks` | Hat-tricks & multi-goal games |
+| `team_tournament_progress` | `by_team` | Furthest round reached, by nation |
+| `shootout_kicks` | `by_player` | Shootout record by taker |
+| `award_winners` | `by_award` | Winners by award type (self-describing) |
 
 ---
 

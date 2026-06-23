@@ -13,8 +13,8 @@ run: goals -> top_scorers
 // Top scorers who NEVER won a World Cup (bridges goals → tournament outcomes).
 run: goals -> top_scorers_never_won
 
-// Top women's-tournament scorers only (gender dimension in action).
-run: goals -> top_scorers + { where: gender = 'Women' }
+// Top women's-tournament scorers only (gender lives on the tournament join).
+run: goals -> top_scorers + { where: tournament.gender = 'Women' }
 
 // When are goals scored? Distribution across regulation minutes.
 run: goals -> goals_by_minute
@@ -64,4 +64,34 @@ run: host_countries -> {
     host      is team.team_name
     performance
   order_by: host_year
+}
+
+// ── Player minutes & efficiency (1970+) ───────────────────────────────────────
+
+// Most minutes played in World Cup history (Messi, Maldini, Matthäus …).
+run: player_appearances -> minutes_leaders
+
+// Best goals per 90 minutes among players with real minutes (min 270).
+run: player_appearances -> top_goals_per_90
+
+// ── Rounds, scorelines, hat-tricks, shootouts & awards ────────────────────────
+
+// Every hat-trick (3+ goals in a match) in World Cup history.
+run: player_match_scoring -> hat_tricks
+
+// How far each nation has gone — semis & finals reached (mixes men's & women's).
+run: team_tournament_progress -> by_team
+
+// Best shootout takers by kicks taken and conversion rate.
+run: shootout_kicks -> by_player
+
+// Award winners by award type — self-describing (Golden Boot, Golden Ball, …).
+run: award_winners -> by_award
+
+// Goals by round, correctly ordered group → final (via the canonical stage_ref).
+run: goals -> {
+  group_by: stage_ref.stage_rank, stage_ref.stage_label
+  aggregate: goal_count
+  where: own_goal = 0
+  order_by: stage_rank
 }
